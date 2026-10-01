@@ -1,5 +1,6 @@
 .kilo/
 venv/
+.env
 tests/___pycache__/
 tests/__pycache__/runner.cpython-310.pyc
 __pycache__/
