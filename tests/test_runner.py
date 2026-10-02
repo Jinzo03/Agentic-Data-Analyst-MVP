@@ -20,6 +20,12 @@ from runner import CodeExecutionRunner  # noqa: E402
 
 class CodeExecutionRunnerTest(unittest.TestCase):
     def test_runs_analysis_and_saves_chart(self):
+        sandbox_check = object.__new__(CodeExecutionRunner)
+        sandbox_check.docker_image = "agentic-data-analyst-sandbox:latest"
+        sandbox_error = sandbox_check._check_docker()
+        if sandbox_error:
+            self.skipTest(sandbox_error)
+
         data = pd.DataFrame(
             {
                 "category": ["A", "A", "A", "B", "B", "B"],

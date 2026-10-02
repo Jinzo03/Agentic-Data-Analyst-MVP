@@ -39,7 +39,16 @@ if run_button and uploaded_file is not None:
 
     with st.spinner("Running pre-flight profiling & statistical diagnostic check..."):
         con = duckdb.connect(database=":memory:")
-        con.execute(f"CREATE TABLE dataset AS SELECT * FROM read_csv_auto('{temp_data_path}')")
+        if Path(temp_data_path).suffix.lower() == ".parquet":
+            con.execute(
+                "CREATE TABLE dataset AS SELECT * FROM read_parquet(?)",
+                [temp_data_path],
+            )
+        else:
+            con.execute(
+                "CREATE TABLE dataset AS SELECT * FROM read_csv_auto(?)",
+                [temp_data_path],
+            )
         profiler = DataProfiler(con)
         profile_report = profiler.run_preflight_check()
         con.close()
@@ -72,6 +81,8 @@ if run_button and uploaded_file is not None:
                 )
 
                 if execution["status"] == "success":
+                    break
+                if not execution.get("recoverable", True):
                     break
                 if refinement_count >= MAX_CODE_REFINEMENTS:
                     break
@@ -124,8 +135,17 @@ if run_button and uploaded_file is not None:
 
         with st.spinner("Generating executive report and running verification audit..."):
             verifier = VerificationLayer()
-            report = verifier.generate_report(user_query, execution["stdout"])
-            verification = verifier.verify_report(report, execution["stdout"])
+            numeric_results = execution.get("numeric_results", {})
+            report = verifier.generate_report(
+                user_query,
+                execution["stdout"],
+                numeric_results=numeric_results,
+            )
+            verification = verifier.verify_report(
+                report,
+                execution["stdout"],
+                numeric_results=numeric_results,
+            )
 
         # Display UI
         st.divider()
@@ -185,3 +205,6 @@ if run_button and uploaded_file is not None:
 
             with st.expander(" Raw Execution Terminal Output (stdout)", expanded=True):
                 st.code(execution["stdout"])
+
+            with st.expander(" Runner Numeric Results (JSON)", expanded=False):
+                st.json(numeric_results)

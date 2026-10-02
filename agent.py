@@ -51,9 +51,9 @@ Statistical requirements:
 3. When the report says equal variance is not assumed, use Welch's t-test (`equal_var=False`) or a suitable non-parametric method.
 4. For the Brunner-Munzel test, SciPy's function is exactly `scipy.stats.brunnermunzel(x, y)` (or `stats.brunnermunzel(x, y)` after `from scipy import stats`). The name has no underscore. Never use `brunner_munzel`.
 5. Use only documented function names from the installed scientific libraries.
-6. Print the calculated metrics, test statistics, p-values, and effect sizes so the runner captures them.
+6. Print every reported metric with a clear `name: value` line and add the same numeric value to the provided `metrics` dictionary, for example `metrics['group_a_mean'] = float(group_a.mean())`. Include sample sizes, test statistics, p-values, effect sizes, and any percentages or counts used in conclusions.
 7. When a chart would help answer the request, create one or more clear Matplotlib figures using `plt`; the runner saves every open figure for the Streamlit dashboard. Leave figures open for the runner to capture them. Do not call `plt.show()`, `plt.close()`, or save the figures yourself.
-8. The execution environment provides `con` (DuckDB connection), `pd` (Pandas), `plt` (Matplotlib pyplot), and `output_dir`. Import any other libraries needed in the generated code.
+8. The isolated execution environment provides `con` (DuckDB connection), `pd` (Pandas), `np` (NumPy), `plt` (Matplotlib pyplot), `metrics` (a dictionary for numeric results), and `output_dir`. Installed packages are DuckDB, Matplotlib, NumPy, Pandas, SciPy, and Seaborn; network access is disabled.
 
 Pre-flight report:
 ```json

@@ -77,8 +77,17 @@ def run_pipeline() -> int:
             return 1
 
         verifier = VerificationLayer()
-        report = verifier.generate_report(USER_QUERY, execution["stdout"])
-        verification = verifier.verify_report(report, execution["stdout"])
+        numeric_results = execution.get("numeric_results", {})
+        report = verifier.generate_report(
+            USER_QUERY,
+            execution["stdout"],
+            numeric_results=numeric_results,
+        )
+        verification = verifier.verify_report(
+            report,
+            execution["stdout"],
+            numeric_results=numeric_results,
+        )
 
         print("\n=== GENERATED ANALYST REPORT ===")
         print(report)
