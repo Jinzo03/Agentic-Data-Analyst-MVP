@@ -43,7 +43,7 @@ class AgenticDataAnalyst:
     def _build_system_prompt(self, profile_report: dict[str, Any]) -> str:
         """Build instructions that tie analysis choices to profiler results."""
         report_json = json.dumps(profile_report, indent=2, default=str)
-        return f"""You are a senior data scientist and lead analyst. Generate Python code to explore the dataset and answer the user's analysis request.
+        return f"""You are a senior data scientist and lead analyst. Generate Python code to explore the dataset and answer the user's latest analysis request in the context of the conversation.
 
 Statistical requirements:
 1. Read the pre-flight report before selecting a statistical procedure.
@@ -54,6 +54,7 @@ Statistical requirements:
 6. Print every reported metric with a clear `name: value` line and add the same numeric value to the provided `metrics` dictionary, for example `metrics['group_a_mean'] = float(group_a.mean())`. Include sample sizes, test statistics, p-values, effect sizes, and any percentages or counts used in conclusions.
 7. When a chart would help answer the request, create one or more clear Matplotlib figures using `plt`; the runner saves every open figure for the Streamlit dashboard. Leave figures open for the runner to capture them. Do not call `plt.show()`, `plt.close()`, or save the figures yourself.
 8. The isolated execution environment provides `con` (DuckDB connection), `pd` (Pandas), `np` (NumPy), `plt` (Matplotlib pyplot), `metrics` (a dictionary for numeric results), and `output_dir`. Installed packages are DuckDB, Matplotlib, NumPy, Pandas, SciPy, and Seaborn; network access is disabled.
+9. Each code run starts with a fresh Python process and DuckDB connection. Use conversation history to understand follow-ups, but query the current dataset again; do not rely on variables from earlier runs.
 
 Pre-flight report:
 ```json
@@ -72,15 +73,26 @@ PYTHON CODE: One fenced Python code block containing executable Python code.
         user_query: str,
         profile_report: dict[str, Any],
         *,
+        conversation_history: list[dict[str, str]] | None = None,
         previous_code: str | None = None,
         error_trace: str | None = None,
     ) -> dict[str, str]:
         """Generate code, or repair a previous attempt using its traceback."""
         system_prompt = self._build_system_prompt(profile_report)
-        user_prompt = (
-            f"User request: {user_query}\n"
-            "Write Python code to analyze this request using the provided dataset."
-        )
+        if conversation_history:
+            history_json = json.dumps(conversation_history[-12:], indent=2)
+            user_prompt = (
+                "Conversation history (context for the latest request):\n"
+                f"<conversation_history>\n{history_json}\n</conversation_history>\n\n"
+                f"Latest user request: {user_query}\n"
+                "Continue the analysis in context and write executable Python code "
+                "against the provided dataset."
+            )
+        else:
+            user_prompt = (
+                f"Latest user request: {user_query}\n"
+                "Write Python code to analyze this request using the provided dataset."
+            )
         if previous_code is not None or error_trace is not None:
             if previous_code is None or error_trace is None:
                 raise ValueError(

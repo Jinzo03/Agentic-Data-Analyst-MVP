@@ -1,210 +1,361 @@
-import tempfile
-import streamlit as st
-import duckdb
-from pathlib import Path
+"""Streamlit chat interface for iterative dataset analysis."""
 
-from profiler import DataProfiler
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import duckdb
+import streamlit as st
+
 from agent import AgenticDataAnalyst
+from profiler import DataProfiler
 from runner import CodeExecutionRunner
 from verifier import VerificationLayer
 
-st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
 
-st.title(" Agentic Data Analyst")
-st.subheader("Autonomous data analytics with statistical verification and review")
 PROJECT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_DIR / "output"
 MAX_CODE_REFINEMENTS = 2
+MAX_HISTORY_MESSAGES = 12
 
-# Sidebar: File Upload & Configuration
-with st.sidebar:
-    st.header("1. Data Source")
-    uploaded_file = st.file_uploader("Upload CSV or Parquet", type=["csv", "parquet"])
-    
-    st.header("2. Analysis Request")
-    user_query = st.text_area(
-        "What would you like to analyze?",
-        value="Compare revenue across departments and test if differences are statistically significant."
-    )
-    
-    run_button = st.button("Run Agentic Analysis", type="primary")
+st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
+st.title("Agentic Data Analyst")
+st.subheader("Conversational data analysis with statistical verification")
 
-if run_button and uploaded_file is not None:
-    # Save uploaded file to temp path
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
-        tmp_file.write(uploaded_file.getvalue())
-        temp_data_path = tmp_file.name
 
-    output_dir = PROJECT_DIR / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    with st.spinner("Running pre-flight profiling & statistical diagnostic check..."):
-        con = duckdb.connect(database=":memory:")
-        if Path(temp_data_path).suffix.lower() == ".parquet":
-            con.execute(
+def profile_dataset(path: str) -> dict[str, Any]:
+    """Profile the selected CSV or Parquet file once per uploaded dataset."""
+    connection = duckdb.connect(database=":memory:")
+    try:
+        if Path(path).suffix.lower() == ".parquet":
+            connection.execute(
                 "CREATE TABLE dataset AS SELECT * FROM read_parquet(?)",
-                [temp_data_path],
+                [path],
             )
         else:
-            con.execute(
+            connection.execute(
                 "CREATE TABLE dataset AS SELECT * FROM read_csv_auto(?)",
-                [temp_data_path],
+                [path],
             )
-        profiler = DataProfiler(con)
-        profile_report = profiler.run_preflight_check()
-        con.close()
+        return DataProfiler(connection).run_preflight_check()
+    finally:
+        connection.close()
 
-    with st.spinner("Agent planning and writing execution code based on diagnostics..."):
-        agent = AgenticDataAnalyst()
-        generated = agent.generate_analysis_code(user_query, profile_report)
 
+def run_analysis_turn(
+    user_query: str,
+    profile_report: dict[str, Any],
+    conversation_history: list[dict[str, str]],
+    data_path: str,
+) -> dict[str, Any]:
+    """Generate, execute, optionally repair, report, and verify one chat turn."""
+    agent = AgenticDataAnalyst()
+    generated = agent.generate_analysis_code(
+        user_query,
+        profile_report,
+        conversation_history=conversation_history,
+    )
     if not generated["code"].strip():
-        st.error("The model did not return executable Python code.")
-        st.code(generated["raw_response"])
-        st.stop()
+        return {
+            "role": "assistant",
+            "content": "I couldn't produce executable analysis code for that request.",
+            "context": generated["raw_response"],
+            "error": generated["raw_response"],
+            "audit": {"generated": generated, "attempts": []},
+        }
 
-    attempt_history = []
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    attempt_history: list[dict[str, Any]] = []
     refinement_count = 0
-    with st.spinner(
-        "Executing code; automatically repairing failures "
-        f"(up to {MAX_CODE_REFINEMENTS} retries)..."
-    ):
-        runner = CodeExecutionRunner(temp_data_path, output_dir=str(output_dir))
-        try:
-            while True:
-                execution = runner.execute_python_code(generated["code"])
-                attempt_history.append(
-                    {
-                        "code": generated["code"],
-                        "status": execution["status"],
-                        "error": execution["error"],
-                    }
+    runner = CodeExecutionRunner(data_path, output_dir=str(OUTPUT_DIR))
+    try:
+        while True:
+            execution = runner.execute_python_code(generated["code"])
+            attempt_history.append(
+                {
+                    "code": generated["code"],
+                    "status": execution["status"],
+                    "error": execution["error"],
+                }
+            )
+
+            if execution["status"] == "success":
+                break
+            if not execution.get("recoverable", True):
+                break
+            if refinement_count >= MAX_CODE_REFINEMENTS:
+                break
+
+            failed_code = generated["code"]
+            failed_trace = execution["error"] or "Execution failed without a traceback."
+            refinement_count += 1
+            try:
+                generated = agent.generate_analysis_code(
+                    user_query,
+                    profile_report,
+                    conversation_history=conversation_history,
+                    previous_code=failed_code,
+                    error_trace=failed_trace,
                 )
+            except Exception as refinement_error:
+                execution["error"] = (
+                    f"{failed_trace}\n\nAuto-refinement request failed: "
+                    f"{type(refinement_error).__name__}: {refinement_error}"
+                )
+                break
 
-                if execution["status"] == "success":
-                    break
-                if not execution.get("recoverable", True):
-                    break
-                if refinement_count >= MAX_CODE_REFINEMENTS:
-                    break
+            if not generated["code"].strip():
+                execution["error"] = (
+                    f"{failed_trace}\n\nAuto-refinement returned no executable code.\n"
+                    f"Gemini response:\n{generated['raw_response']}"
+                )
+                break
+    finally:
+        runner.con.close()
 
-                failed_code = generated["code"]
-                failed_trace = execution["error"] or "Execution failed without a traceback."
-                refinement_count += 1
-                try:
-                    generated = agent.generate_analysis_code(
-                        user_query,
-                        profile_report,
-                        previous_code=failed_code,
-                        error_trace=failed_trace,
-                    )
-                except Exception as refinement_error:
-                    execution["error"] = (
-                        f"{failed_trace}\n\n"
-                        "Auto-refinement request failed:\n"
-                        f"{type(refinement_error).__name__}: {refinement_error}"
-                    )
-                    break
-
-                if not generated["code"].strip():
-                    execution["error"] = (
-                        f"{failed_trace}\n\n"
-                        "Auto-refinement returned no executable Python code.\n"
-                        f"Gemini response:\n{generated['raw_response']}"
-                    )
-                    break
-        finally:
-            runner.con.close()
+    audit: dict[str, Any] = {
+        "generated": generated,
+        "attempts": attempt_history,
+        "refinement_count": refinement_count,
+    }
 
     if execution["status"] != "success":
-        st.error(
-            "Execution failed after "
-            f"{len(attempt_history)} attempt(s), including "
-            f"{refinement_count} automatic repair(s)."
-        )
-        for index, attempt in enumerate(attempt_history, start=1):
-            with st.expander(f"Failed attempt {index}: generated code and traceback"):
-                st.code(attempt["code"], language="python")
-                st.code(attempt["error"] or "No traceback was captured.")
-        st.code(execution["error"], language="python")
-        st.stop()
-    else:
-        if refinement_count:
-            st.success(
-                f"Execution recovered after {refinement_count} automatic code repair(s)."
-            )
+        error_text = execution["error"] or "The isolated runner returned an unknown error."
+        return {
+            "role": "assistant",
+            "content": (
+                f"I couldn't complete that analysis after {len(attempt_history)} "
+                f"execution attempt(s) and {refinement_count} automatic repair(s). "
+                "The traceback is available in the audit details below."
+            ),
+            "context": f"Analysis failed. Error and traceback:\n{error_text}",
+            "error": error_text,
+            "audit": audit,
+        }
 
-        with st.spinner("Generating executive report and running verification audit..."):
-            verifier = VerificationLayer()
-            numeric_results = execution.get("numeric_results", {})
-            report = verifier.generate_report(
-                user_query,
-                execution["stdout"],
-                numeric_results=numeric_results,
-            )
-            verification = verifier.verify_report(
-                report,
-                execution["stdout"],
-                numeric_results=numeric_results,
-            )
+    numeric_results = execution.get("numeric_results", {})
+    verifier = VerificationLayer()
+    report = verifier.generate_report(
+        user_query,
+        execution["stdout"],
+        numeric_results=numeric_results,
+        conversation_history=conversation_history,
+    )
+    verification = verifier.verify_report(
+        report,
+        execution["stdout"],
+        numeric_results=numeric_results,
+    )
+    audit.update(
+        {
+            "stdout": execution["stdout"],
+            "numeric_results": numeric_results,
+            "verification": verification,
+        }
+    )
+    history_numeric_results = dict(list(numeric_results.items())[:100])
+    numeric_context = json.dumps(
+        history_numeric_results,
+        indent=2,
+        allow_nan=False,
+    )
+    if len(numeric_results) > len(history_numeric_results):
+        numeric_context += "\n[Older numeric entries omitted from chat context.]"
+    assistant_context = (
+        f"Report:\n{report}\n\n"
+        "Recent executed output (may be truncated):\n"
+        f"{execution['stdout'][-6000:]}\n\n"
+        "Runner numeric results JSON:\n"
+        f"{numeric_context}\n\n"
+        f"Verification result: {json.dumps(verification, ensure_ascii=False)}"
+    )
+    return {
+        "role": "assistant",
+        "content": report,
+        "context": assistant_context,
+        "charts": execution.get("chart_paths") or [],
+        "audit": audit,
+    }
 
-        # Display UI
-        st.divider()
 
-        st.markdown("### Visualizations")
-        chart_paths = execution.get("chart_paths") or (
-            [execution["chart_path"]] if execution.get("chart_path") else []
-        )
-        visible_charts = [
-            path for path in chart_paths if path and Path(path).is_file()
-        ]
-        if visible_charts:
-            for index, chart_path in enumerate(visible_charts, start=1):
-                st.image(
-                    chart_path,
-                    caption=f"Generated visualization {index}",
-                    width="stretch",
-                )
-        else:
+def render_message(message: dict[str, Any]) -> None:
+    """Render one persisted chat turn and its analysis artifacts."""
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message["role"] != "assistant":
+            return
+
+        audit = message.get("audit", {})
+        verification = audit.get("verification")
+        if verification:
+            if verification["verified"]:
+                st.success("Numeric and statistical verification passed.")
+            else:
+                st.error("Verification found unsupported or inconsistent claims.")
+                for violation in verification["violations"]:
+                    st.warning(violation)
+
+        if audit.get("refinement_count"):
             st.info(
-                "No visualization was generated for this request. "
-                "Ask for a chart or plot when you run the analysis again."
+                "Execution recovered after "
+                f"{audit['refinement_count']} automatic code repair(s)."
             )
-        
-        # Top Metric: Verification Guardrail Status
-        if verification["verified"]:
-            st.success(" Audit Verification Passed: No statistical hallucinations detected.")
-        else:
-            st.error(" Audit Verification Failed!")
-            for v in verification["violations"]:
-                st.warning(f"- {v}")
 
-        col_left, col_right = st.columns([1, 1])
+        if message.get("error"):
+            for index, attempt in enumerate(audit.get("attempts", []), start=1):
+                with st.expander(f"Attempt {index}: code and traceback"):
+                    st.code(attempt["code"], language="python")
+                    st.code(attempt["error"] or "No traceback was captured.")
+            if not audit.get("attempts"):
+                st.code(message["error"])
+            return
 
-        with col_left:
-            st.markdown("### Executive Analyst Report")
-            st.markdown(report)
-            
-        with col_right:
-            st.markdown("### Human Audit Trail")
-            
-            with st.expander(" Pre-Flight Diagnostic Report", expanded=False):
-                st.json(profile_report)
+        chart_paths = [
+            path for path in message.get("charts", []) if Path(path).is_file()
+        ]
+        if chart_paths:
+            with st.expander("Visualizations", expanded=True):
+                for index, chart_path in enumerate(chart_paths, start=1):
+                    st.image(
+                        chart_path,
+                        caption=f"Generated visualization {index}",
+                        width="stretch",
+                    )
 
-            with st.expander(" Agent Strategy & Reasoning Plan", expanded=True):
+        generated = audit.get("generated", {})
+        with st.expander("Analysis details", expanded=False):
+            if generated.get("plan"):
+                st.markdown("**Analysis plan**")
                 st.markdown(generated["plan"])
-
-            if refinement_count:
-                with st.expander(" Auto-Refinement History", expanded=False):
-                    for index, attempt in enumerate(attempt_history[:-1], start=1):
-                        st.markdown(f"**Failed attempt {index}**")
-                        st.code(attempt["code"], language="python")
-                        st.code(attempt["error"] or "No traceback was captured.")
-
-            with st.expander(" Executed Python Code", expanded=True):
+            if generated.get("code"):
+                st.markdown("**Executed code**")
                 st.code(generated["code"], language="python")
+            if audit.get("stdout"):
+                st.markdown("**Captured output**")
+                st.code(audit["stdout"])
+            if audit.get("numeric_results") is not None:
+                st.markdown("**Runner numeric results (JSON)**")
+                st.json(audit["numeric_results"])
 
-            with st.expander(" Raw Execution Terminal Output (stdout)", expanded=True):
-                st.code(execution["stdout"])
+        if audit.get("refinement_count"):
+            with st.expander("Auto-refinement history", expanded=False):
+                for index, attempt in enumerate(audit.get("attempts", [])[:-1], start=1):
+                    st.markdown(f"**Failed attempt {index}**")
+                    st.code(attempt["code"], language="python")
+                    st.code(attempt["error"] or "No traceback was captured.")
 
-            with st.expander(" Runner Numeric Results (JSON)", expanded=False):
-                st.json(numeric_results)
+
+def clear_conversation() -> None:
+    st.session_state["chat_messages"] = []
+
+
+for state_key, initial_value in (
+    ("chat_messages", []),
+    ("dataset_path", None),
+    ("dataset_name", None),
+    ("dataset_hash", None),
+    ("profile_report", None),
+):
+    if state_key not in st.session_state:
+        st.session_state[state_key] = initial_value
+
+
+with st.sidebar:
+    st.header("Data source")
+    uploaded_file = st.file_uploader(
+        "Upload CSV or Parquet",
+        type=["csv", "parquet"],
+        key="dataset_uploader",
+    )
+    if st.session_state["dataset_path"]:
+        st.caption(f"Current dataset: {st.session_state['dataset_name']}")
+        st.button(
+            "Clear conversation",
+            on_click=clear_conversation,
+            width="stretch",
+        )
+
+
+if uploaded_file is not None:
+    uploaded_bytes = uploaded_file.getvalue()
+    upload_hash = hashlib.sha256(uploaded_bytes).hexdigest()
+    if upload_hash != st.session_state["dataset_hash"]:
+        suffix = Path(uploaded_file.name).suffix.lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(uploaded_bytes)
+            new_data_path = temp_file.name
+
+        try:
+            with st.spinner("Profiling this dataset for the conversation..."):
+                new_profile = profile_dataset(new_data_path)
+        except Exception as exc:
+            Path(new_data_path).unlink(missing_ok=True)
+            st.error(f"Could not load or profile the dataset: {exc}")
+            st.stop()
+
+        old_data_path = st.session_state["dataset_path"]
+        if old_data_path and old_data_path != new_data_path:
+            Path(old_data_path).unlink(missing_ok=True)
+        st.session_state["dataset_path"] = new_data_path
+        st.session_state["dataset_name"] = uploaded_file.name
+        st.session_state["dataset_hash"] = upload_hash
+        st.session_state["profile_report"] = new_profile
+        st.session_state["chat_messages"] = []
+
+
+if st.session_state["dataset_path"] is None:
+    st.info("Upload a CSV or Parquet dataset to start a conversation.")
+else:
+    summary = st.session_state["profile_report"].get("summary", {})
+    st.caption(
+        f"Using **{st.session_state['dataset_name']}** · "
+        f"{summary.get('total_rows', '?')} rows · "
+        f"{summary.get('total_columns', '?')} columns. "
+        "Upload a different file whenever you want to change the data."
+    )
+
+    if not st.session_state["chat_messages"]:
+        with st.chat_message("assistant"):
+            st.markdown(
+                "Ask a question about the data. Follow up naturally, for example "
+                "**“Now group this by region”** or **“Why did you choose that test?”**."
+            )
+
+    for stored_message in st.session_state["chat_messages"]:
+        render_message(stored_message)
+
+    prompt = st.chat_input("Ask about the data or follow up on an earlier result")
+    if prompt:
+        user_message = {"role": "user", "content": prompt}
+        prior_messages = st.session_state["chat_messages"][-MAX_HISTORY_MESSAGES:]
+        conversation_history = [
+            {
+                "role": message["role"],
+                "content": message.get("context", message["content"]),
+            }
+            for message in prior_messages
+        ]
+        st.session_state["chat_messages"].append(user_message)
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.spinner("Analyzing your request..."):
+            try:
+                response_message = run_analysis_turn(
+                    prompt,
+                    st.session_state["profile_report"],
+                    conversation_history,
+                    st.session_state["dataset_path"],
+                )
+            except Exception as exc:
+                response_message = {
+                    "role": "assistant",
+                    "content": f"I couldn't complete that turn: {type(exc).__name__}: {exc}",
+                    "context": f"Turn error: {type(exc).__name__}: {exc}",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "audit": {},
+                }
+        st.session_state["chat_messages"].append(response_message)
+        render_message(response_message)
