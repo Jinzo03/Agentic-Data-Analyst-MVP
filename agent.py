@@ -25,6 +25,7 @@ class AgenticDataAnalyst:
             "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-2.5-flash",
         ),
     ) -> None:
         api_key = api_key or os.getenv("GEMINI_API_KEY")
