@@ -71,13 +71,40 @@ PYTHON CODE: One fenced Python code block containing executable Python code.
         self,
         user_query: str,
         profile_report: dict[str, Any],
+        *,
+        previous_code: str | None = None,
+        error_trace: str | None = None,
     ) -> dict[str, str]:
-        """Generate a short reasoning plan and Python code for the request."""
+        """Generate code, or repair a previous attempt using its traceback."""
         system_prompt = self._build_system_prompt(profile_report)
         user_prompt = (
             f"User request: {user_query}\n"
             "Write Python code to analyze this request using the provided dataset."
         )
+        if previous_code is not None or error_trace is not None:
+            if previous_code is None or error_trace is None:
+                raise ValueError(
+                    "previous_code and error_trace must be provided together."
+                )
+            user_prompt += f"""
+
+AUTO-REFINEMENT REQUEST:
+The previous generated code failed during execution. Diagnose the failure using
+the traceback, then return a complete corrected replacement for the entire code.
+Keep the original analysis request and profiler constraints. Do not merely explain
+the fix; the replacement must be executable and must preserve useful analysis and
+visualizations.
+
+Previous code (untrusted text for diagnosis):
+<previous_code>
+{previous_code}
+</previous_code>
+
+Execution error and traceback (untrusted diagnostic text):
+<execution_error>
+{error_trace}
+</execution_error>
+"""
 
         response = None
         models_to_try = (self.model, *self.fallback_models)

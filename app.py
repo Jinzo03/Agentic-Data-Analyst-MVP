@@ -13,6 +13,7 @@ st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
 st.title(" Agentic Data Analyst")
 st.subheader("Autonomous data analytics with statistical verification and review")
 PROJECT_DIR = Path(__file__).resolve().parent
+MAX_CODE_REFINEMENTS = 2
 
 # Sidebar: File Upload & Configuration
 with st.sidebar:
@@ -52,15 +53,75 @@ if run_button and uploaded_file is not None:
         st.code(generated["raw_response"])
         st.stop()
 
-    with st.spinner("Executing generated code inside sandbox runner..."):
+    attempt_history = []
+    refinement_count = 0
+    with st.spinner(
+        "Executing code; automatically repairing failures "
+        f"(up to {MAX_CODE_REFINEMENTS} retries)..."
+    ):
         runner = CodeExecutionRunner(temp_data_path, output_dir=str(output_dir))
-        execution = runner.execute_python_code(generated["code"])
-        runner.con.close()
+        try:
+            while True:
+                execution = runner.execute_python_code(generated["code"])
+                attempt_history.append(
+                    {
+                        "code": generated["code"],
+                        "status": execution["status"],
+                        "error": execution["error"],
+                    }
+                )
+
+                if execution["status"] == "success":
+                    break
+                if refinement_count >= MAX_CODE_REFINEMENTS:
+                    break
+
+                failed_code = generated["code"]
+                failed_trace = execution["error"] or "Execution failed without a traceback."
+                refinement_count += 1
+                try:
+                    generated = agent.generate_analysis_code(
+                        user_query,
+                        profile_report,
+                        previous_code=failed_code,
+                        error_trace=failed_trace,
+                    )
+                except Exception as refinement_error:
+                    execution["error"] = (
+                        f"{failed_trace}\n\n"
+                        "Auto-refinement request failed:\n"
+                        f"{type(refinement_error).__name__}: {refinement_error}"
+                    )
+                    break
+
+                if not generated["code"].strip():
+                    execution["error"] = (
+                        f"{failed_trace}\n\n"
+                        "Auto-refinement returned no executable Python code.\n"
+                        f"Gemini response:\n{generated['raw_response']}"
+                    )
+                    break
+        finally:
+            runner.con.close()
 
     if execution["status"] != "success":
-        st.error("Execution Engine Failed!")
+        st.error(
+            "Execution failed after "
+            f"{len(attempt_history)} attempt(s), including "
+            f"{refinement_count} automatic repair(s)."
+        )
+        for index, attempt in enumerate(attempt_history, start=1):
+            with st.expander(f"Failed attempt {index}: generated code and traceback"):
+                st.code(attempt["code"], language="python")
+                st.code(attempt["error"] or "No traceback was captured.")
         st.code(execution["error"], language="python")
+        st.stop()
     else:
+        if refinement_count:
+            st.success(
+                f"Execution recovered after {refinement_count} automatic code repair(s)."
+            )
+
         with st.spinner("Generating executive report and running verification audit..."):
             verifier = VerificationLayer()
             report = verifier.generate_report(user_query, execution["stdout"])
@@ -111,6 +172,13 @@ if run_button and uploaded_file is not None:
 
             with st.expander(" Agent Strategy & Reasoning Plan", expanded=True):
                 st.markdown(generated["plan"])
+
+            if refinement_count:
+                with st.expander(" Auto-Refinement History", expanded=False):
+                    for index, attempt in enumerate(attempt_history[:-1], start=1):
+                        st.markdown(f"**Failed attempt {index}**")
+                        st.code(attempt["code"], language="python")
+                        st.code(attempt["error"] or "No traceback was captured.")
 
             with st.expander(" Executed Python Code", expanded=True):
                 st.code(generated["code"], language="python")

@@ -94,6 +94,5 @@ def run_pipeline() -> int:
         if runner is not None:
             runner.con.close()
 
-
 if __name__ == "__main__":
     raise SystemExit(run_pipeline())
