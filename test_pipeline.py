@@ -1,45 +1,99 @@
+"""Run the complete profiling, analysis, execution, and verification pipeline."""
+
+from pathlib import Path
+
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from runner import CodeExecutionRunner
-from profiler import DataProfiler
 from agent import AgenticDataAnalyst
+from profiler import DataProfiler
+from runner import CodeExecutionRunner
+from verifier import VerificationLayer
 
-# 1. Setup synthetic data with non-normal metric
-np.random.seed(42)
-df_sample = pd.DataFrame({
-    "department": ["Engineering"] * 50 + ["Marketing"] * 50,
-    # Non-normally distributed revenue (skewed distribution)
-    "revenue": list(np.random.exponential(scale=100, size=50)) + list(np.random.exponential(scale=250, size=50))
-})
-df_sample.to_csv("company_data.csv", index=False)
 
-# 2. Run Pre-flight Profiler (Step 2)
-con = duckdb.connect(database=':memory:')
-con.execute("CREATE TABLE dataset AS SELECT * FROM read_csv_auto('company_data.csv')")
-profiler = DataProfiler(con)
-profile_report = profiler.run_preflight_check()
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_PATH = PROJECT_DIR / "company_data.csv"
+OUTPUT_DIR = PROJECT_DIR / "output"
+USER_QUERY = (
+    "Compare revenue across Engineering and Marketing departments and "
+    "test whether the difference is statistically significant."
+)
 
-# 3. Instantiate Agent & Generate Code (Step 3)
-# agent.py reads GEMINI_API_KEY from .env. Do not pass the old OpenAI
-# placeholder here, because it overrides the Gemini key loaded from .env.
-agent = AgenticDataAnalyst()
 
-query = "Compare revenue across Engineering and Marketing departments and test if the difference is statistically significant."
-generated_output = agent.generate_analysis_code(query, profile_report)
+def create_sample_data(path: Path) -> None:
+    """Write deterministic sample data with skewed revenue distributions."""
+    rng = np.random.default_rng(42)
+    data = pd.DataFrame(
+        {
+            "department": ["Engineering"] * 50 + ["Marketing"] * 50,
+            "revenue": np.concatenate(
+                [
+                    rng.exponential(scale=100, size=50),
+                    rng.exponential(scale=250, size=50),
+                ]
+            ),
+        }
+    )
+    data.to_csv(path, index=False)
 
-print("=== AGENT REASONING PLAN ===")
-print(generated_output["plan"])
 
-print("\n=== GENERATED CODE ===")
-print(generated_output["code"])
+def run_pipeline() -> int:
+    """Run each pipeline stage and return a process exit code."""
+    create_sample_data(DATA_PATH)
 
-# 4. Execute Code in Runner Sandbox (Step 1)
-runner = CodeExecutionRunner("company_data.csv")
-execution_result = runner.execute_python_code(generated_output["code"])
+    profile_connection = duckdb.connect(database=":memory:")
+    runner = None
+    try:
+        profile_connection.execute(
+            "CREATE TABLE dataset AS SELECT * FROM read_csv_auto(?)",
+            [str(DATA_PATH)],
+        )
+        profile_report = DataProfiler(profile_connection).run_preflight_check()
 
-print("\n=== EXECUTION RESULT ===")
-print("Status:", execution_result["status"])
-print("Captured Output:\n", execution_result["stdout"])
-print("Saved Chart:", execution_result["chart_path"])
+        # Both clients read GEMINI_API_KEY from the project .env file.
+        agent = AgenticDataAnalyst()
+        generated = agent.generate_analysis_code(USER_QUERY, profile_report)
+        if not generated["code"].strip():
+            raise RuntimeError(
+                "Gemini did not return a fenced Python code block. "
+                "Raw response:\n" + generated["raw_response"]
+            )
+
+        print("=== AGENT REASONING PLAN ===")
+        print(generated["plan"])
+        print("\n=== GENERATED CODE ===")
+        print(generated["code"])
+
+        runner = CodeExecutionRunner(str(DATA_PATH), output_dir=str(OUTPUT_DIR))
+        execution = runner.execute_python_code(generated["code"])
+        print("\n=== EXECUTION RESULT ===")
+        print("Status:", execution["status"])
+        print("Captured output:\n", execution["stdout"])
+        print("Saved chart:", execution["chart_path"])
+
+        if execution["status"] != "success":
+            print("Execution error:\n", execution["error"])
+            return 1
+
+        verifier = VerificationLayer()
+        report = verifier.generate_report(USER_QUERY, execution["stdout"])
+        verification = verifier.verify_report(report, execution["stdout"])
+
+        print("\n=== GENERATED ANALYST REPORT ===")
+        print(report)
+        print("\n=== AUDIT VERIFICATION STATUS ===")
+        print("Passed verification check:", verification["verified"])
+        if verification["violations"]:
+            for violation in verification["violations"]:
+                print("-", violation)
+
+        return 0 if verification["verified"] else 1
+    finally:
+        profile_connection.close()
+        if runner is not None:
+            runner.con.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_pipeline())

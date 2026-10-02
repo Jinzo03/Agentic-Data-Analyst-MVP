@@ -1,2 +1,8 @@
+duckdb
+matplotlib
+numpy
+pandas
 google-genai>=1.0.0
+scipy
+seaborn
 python-dotenv>=1.0.0
