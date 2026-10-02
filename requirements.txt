@@ -5,4 +5,5 @@ pandas
 google-genai>=1.0.0
 scipy
 seaborn
+streamlit
 python-dotenv>=1.0.0

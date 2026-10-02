@@ -1,4 +1,3 @@
-import os
 import tempfile
 import streamlit as st
 import duckdb
@@ -13,6 +12,7 @@ st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
 
 st.title(" Agentic Data Analyst")
 st.subheader("Autonomous data analytics with statistical verification and review")
+PROJECT_DIR = Path(__file__).resolve().parent
 
 # Sidebar: File Upload & Configuration
 with st.sidebar:
@@ -33,8 +33,8 @@ if run_button and uploaded_file is not None:
         tmp_file.write(uploaded_file.getvalue())
         temp_data_path = tmp_file.name
 
-    output_dir = Path("./output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = PROJECT_DIR / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with st.spinner("Running pre-flight profiling & statistical diagnostic check..."):
         con = duckdb.connect(database=":memory:")
@@ -46,6 +46,11 @@ if run_button and uploaded_file is not None:
     with st.spinner("Agent planning and writing execution code based on diagnostics..."):
         agent = AgenticDataAnalyst()
         generated = agent.generate_analysis_code(user_query, profile_report)
+
+    if not generated["code"].strip():
+        st.error("The model did not return executable Python code.")
+        st.code(generated["raw_response"])
+        st.stop()
 
     with st.spinner("Executing generated code inside sandbox runner..."):
         runner = CodeExecutionRunner(temp_data_path, output_dir=str(output_dir))
@@ -63,6 +68,26 @@ if run_button and uploaded_file is not None:
 
         # Display UI
         st.divider()
+
+        st.markdown("### Visualizations")
+        chart_paths = execution.get("chart_paths") or (
+            [execution["chart_path"]] if execution.get("chart_path") else []
+        )
+        visible_charts = [
+            path for path in chart_paths if path and Path(path).is_file()
+        ]
+        if visible_charts:
+            for index, chart_path in enumerate(visible_charts, start=1):
+                st.image(
+                    chart_path,
+                    caption=f"Generated visualization {index}",
+                    width="stretch",
+                )
+        else:
+            st.info(
+                "No visualization was generated for this request. "
+                "Ask for a chart or plot when you run the analysis again."
+            )
         
         # Top Metric: Verification Guardrail Status
         if verification["verified"]:
@@ -78,9 +103,6 @@ if run_button and uploaded_file is not None:
             st.markdown("### Executive Analyst Report")
             st.markdown(report)
             
-            if execution["chart_path"] and os.path.exists(execution["chart_path"]):
-                st.image(execution["chart_path"], caption="Generated Chart", use_container_width=True)
-
         with col_right:
             st.markdown("### Human Audit Trail")
             

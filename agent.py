@@ -49,8 +49,11 @@ Statistical requirements:
 1. Read the pre-flight report before selecting a statistical procedure.
 2. When a relevant variable is non-normal or highly skewed, prefer a suitable non-parametric or robust method over a parametric test.
 3. When the report says equal variance is not assumed, use Welch's t-test (`equal_var=False`) or a suitable non-parametric method.
-4. Print the calculated metrics, test statistics, p-values, and effect sizes so the runner captures them.
-5. The execution environment provides `con` (DuckDB connection), `pd` (Pandas), `plt` (Matplotlib pyplot), and `output_dir`. Import any other libraries needed in the generated code.
+4. For the Brunner-Munzel test, SciPy's function is exactly `scipy.stats.brunnermunzel(x, y)` (or `stats.brunnermunzel(x, y)` after `from scipy import stats`). The name has no underscore. Never use `brunner_munzel`.
+5. Use only documented function names from the installed scientific libraries.
+6. Print the calculated metrics, test statistics, p-values, and effect sizes so the runner captures them.
+7. When a chart would help answer the request, create one or more clear Matplotlib figures using `plt`; the runner saves every open figure for the Streamlit dashboard. Leave figures open for the runner to capture them. Do not call `plt.show()`, `plt.close()`, or save the figures yourself.
+8. The execution environment provides `con` (DuckDB connection), `pd` (Pandas), `plt` (Matplotlib pyplot), and `output_dir`. Import any other libraries needed in the generated code.
 
 Pre-flight report:
 ```json

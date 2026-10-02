@@ -47,6 +47,9 @@ print(f'mean difference: {group_b.mean() - group_a.mean():.2f}')
 df.boxplot(column='score', by='category')
 plt.title('Scores by category')
 plt.suptitle('')
+plt.figure()
+plt.plot([1, 2, 3], [1, 4, 9])
+plt.title('Example trend')
 """
                 )
             finally:
@@ -57,6 +60,9 @@ plt.suptitle('')
             self.assertIn("rows: 6", result["stdout"])
             self.assertIn("mean difference: 9.57", result["stdout"])
             self.assertTrue(result["chart_path"])
+            self.assertEqual(len(result["chart_paths"]), 2)
+            self.assertEqual(result["chart_paths"][0], result["chart_path"])
+            self.assertTrue(all(Path(path).is_file() for path in result["chart_paths"]))
             self.assertTrue(Path(result["chart_path"]).is_file())
 
 
