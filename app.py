@@ -145,6 +145,7 @@ def run_analysis_turn(
         "attempts": attempt_history,
         "refinement_count": refinement_count,
         "profile_diagnostics": profile_report.get("advanced_diagnostics", {}),
+        "data_changes": execution.get("data_changes", []),
         "data_handling_review": review_data_handling(
             initial_code, generated.get("code", "")
         ),
@@ -171,6 +172,7 @@ def run_analysis_turn(
         execution["stdout"],
         numeric_results=numeric_results,
         conversation_history=conversation_history,
+        data_changes=execution.get("data_changes", []),
     )
     verification = verifier.verify_report(
         report,
@@ -272,8 +274,18 @@ def render_message(message: dict[str, Any]) -> None:
                 st.markdown("**Preflight methodology diagnostics**")
                 st.json(diagnostics)
             if audit.get("data_handling_review"):
-                st.markdown("**Data handling operations to review**")
+                st.markdown("**Potential data-handling operations found in code**")
+                st.caption("Static code scan; entries may not have executed.")
                 st.json(audit["data_handling_review"])
+            if audit.get("data_changes"):
+                st.markdown("**Measured data changes during execution**")
+                st.dataframe(audit["data_changes"], hide_index=True, width="stretch")
+            else:
+                st.markdown("**Measured data changes during execution**")
+                st.caption(
+                    "No changes through the tracked DataFrame operations were observed. "
+                    "Other kinds of transformations may not be captured."
+                )
             if generated.get("plan"):
                 st.markdown("**Analysis plan**")
                 st.markdown(generated["plan"])

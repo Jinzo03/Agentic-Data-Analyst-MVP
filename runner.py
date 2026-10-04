@@ -20,6 +20,7 @@ MAX_CAPTURED_OUTPUT_BYTES = 32 * 1024 * 1024
 
 _SANDBOX_WORKER = r'''
 import base64
+import ast
 import contextlib
 import duckdb
 import io
@@ -67,6 +68,173 @@ class CappedStringIO(io.StringIO):
 
 stdout_capture = CappedStringIO()
 metrics = {"significance_threshold": 0.05}
+data_changes = []
+MAX_CELL_COMPARISON = 250000
+
+def dataframe_snapshot(frame):
+    if not isinstance(frame, pd.DataFrame):
+        return None
+    snapshot = {
+        "rows": len(frame),
+        "columns": len(frame.columns),
+        "missing_cells": int(frame.isna().sum().sum()),
+        "index": frame.index.copy(),
+        "columns_index": frame.columns.copy(),
+        "values": None,
+    }
+    if frame.size <= MAX_CELL_COMPARISON:
+        snapshot["values"] = frame.copy(deep=True)
+    return snapshot
+
+def record_data_change(operation, before, after):
+    if before is None or not isinstance(after, pd.DataFrame):
+        return
+    before_rows = before["rows"]
+    after_rows = len(after)
+    before_missing = before["missing_cells"]
+    after_missing = int(after.isna().sum().sum())
+    entry = {
+        "operation": operation,
+        "before_rows": before_rows,
+        "after_rows": after_rows,
+        "rows_removed": max(0, before_rows - after_rows),
+        "rows_added": max(0, after_rows - before_rows),
+        "before_columns": before["columns"],
+        "after_columns": len(after.columns),
+        "missing_cells_before": before_missing,
+        "missing_cells_after": after_missing,
+        "missing_cells_filled": max(0, before_missing - after_missing),
+        "changed_cells": None,
+        "value_comparison": "not measured; frame exceeded comparison limit",
+    }
+    previous = before["values"]
+    if previous is not None:
+        try:
+            shared_columns = previous.columns.intersection(after.columns)
+            common_index = previous.index.intersection(after.index)
+            left = previous.loc[common_index, shared_columns]
+            right = after.loc[common_index, shared_columns]
+            unequal = left.ne(right) & ~(left.isna() & right.isna())
+            entry["changed_cells"] = int(unequal.to_numpy().sum())
+            entry["value_comparison"] = "measured for rows and columns present before and after"
+        except (ValueError, TypeError, KeyError):
+            entry["value_comparison"] = "could not compare values because index/column alignment was ambiguous"
+    changed = (
+        entry["rows_removed"] or entry["rows_added"]
+        or entry["missing_cells_filled"] or entry["changed_cells"]
+        or entry["before_columns"] != entry["after_columns"]
+    )
+    if changed:
+        data_changes.append(entry)
+
+def track_data_operation(operation, source, result):
+    before = dataframe_snapshot(source)
+    record_data_change(operation, before, result)
+    return result
+
+def track_inplace_operation(operation, source, action):
+    before = dataframe_snapshot(source)
+    action()
+    record_data_change(operation, before, source)
+
+def track_index_assignment(operation, source, indexer, key, value):
+    before = dataframe_snapshot(source)
+    indexer[key] = value
+    record_data_change(operation, before, source)
+
+class DataChangeInstrumenter(ast.NodeTransformer):
+    METHOD_LABELS = {
+        "dropna": "null removal (dropna)",
+        "fillna": "null imputation (fillna)",
+        "interpolate": "null imputation (interpolate)",
+        "query": "row filter (query)",
+        "where": "row filter (where)",
+        "drop": "row/column removal (drop)",
+        "drop_duplicates": "duplicate-row removal (drop_duplicates)",
+        "clip": "value clipping / possible outlier handling (clip)",
+        "replace": "value replacement (replace)",
+    }
+
+    def operation(self, expression):
+        for node in ast.walk(expression):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in self.METHOD_LABELS:
+                    source = node.func.value
+                    while isinstance(source, (ast.Attribute, ast.Subscript)):
+                        source = source.value if isinstance(source, ast.Attribute) else source.value
+                    if isinstance(source, ast.Name):
+                        inplace = any(
+                            keyword.arg == "inplace" and isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is True
+                            for keyword in node.keywords
+                        )
+                        return source.id, self.METHOD_LABELS[node.func.attr], inplace
+            if isinstance(node, ast.Subscript):
+                index = node.slice
+                is_row_filter = isinstance(index, (ast.Compare, ast.BoolOp)) or (
+                    isinstance(index, ast.Call) and isinstance(index.func, ast.Attribute)
+                ) or isinstance(index, ast.Name) or (
+                    isinstance(node.value, ast.Attribute)
+                    and node.value.attr in {"loc", "iloc"}
+                )
+                source = node.value
+                while isinstance(source, (ast.Attribute, ast.Subscript)):
+                    source = source.value
+                if is_row_filter and isinstance(source, ast.Name):
+                    label = "row filter (boolean DataFrame selection)"
+                    return source.id, label, False
+        return None
+
+    def visit_Assign(self, node):
+        expression = node.value
+        found = self.operation(expression)
+        node = self.generic_visit(node)
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
+            target = node.targets[0]
+            indexer = target.value
+            source = indexer
+            if isinstance(indexer, ast.Attribute) and indexer.attr in {"loc", "iloc"}:
+                source = indexer.value
+            if isinstance(source, ast.Name):
+                operation = "value assignment (DataFrame indexer)"
+                return ast.copy_location(ast.Expr(value=ast.Call(
+                    func=ast.Name(id="track_index_assignment", ctx=ast.Load()),
+                    args=[ast.Constant(value=operation), source, indexer, target.slice, node.value],
+                    keywords=[],
+                )), node)
+        if found and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            source_name, label, inplace = found
+            if not inplace:
+                node.value = ast.Call(
+                    func=ast.Name(id="track_data_operation", ctx=ast.Load()),
+                    args=[ast.Constant(value=label), ast.Name(id=source_name, ctx=ast.Load()), node.value],
+                    keywords=[],
+                )
+        return node
+
+    def visit_Expr(self, node):
+        expression = node.value
+        found = self.operation(expression)
+        node = self.generic_visit(node)
+        if found and found[2]:
+            source_name, label, _ = found
+            node.value = ast.Call(
+                func=ast.Name(id="track_inplace_operation", ctx=ast.Load()),
+                args=[
+                    ast.Constant(value=label),
+                    ast.Name(id=source_name, ctx=ast.Load()),
+                    ast.Lambda(args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=node.value),
+                ],
+                keywords=[],
+            )
+        return node
+
+def instrument_data_changes(code):
+    tree = ast.parse(code)
+    tree = DataChangeInstrumenter().visit(tree)
+    ast.fix_missing_locations(tree)
+    return compile(tree, "<generated analysis>", "exec")
+
 connection = duckdb.connect(database=":memory:")
 
 try:
@@ -90,9 +258,12 @@ try:
         "plt": plt,
         "output_dir": str(output_dir),
         "metrics": metrics,
+        "track_data_operation": track_data_operation,
+        "track_inplace_operation": track_inplace_operation,
+        "track_index_assignment": track_index_assignment,
     }
     with contextlib.redirect_stdout(stdout_capture):
-        exec(compile(payload["code"], "<generated analysis>", "exec"), namespace)
+        exec(instrument_data_changes(payload["code"]), namespace)
 
     numeric_results = {
         "dataset_rows": int(dataset_rows),
@@ -132,6 +303,15 @@ try:
             label = "stdout." + match.group(1).strip()
             add_numeric(label, float(match.group(2).replace(",", "")))
 
+    for index, change in enumerate(data_changes, start=1):
+        for field in (
+            "before_rows", "after_rows", "rows_removed", "rows_added",
+            "before_columns", "after_columns", "missing_cells_before",
+            "missing_cells_after", "missing_cells_filled", "changed_cells",
+        ):
+            if change[field] is not None:
+                add_numeric(f"data_change_{index}.{field}", change[field])
+
     chart_data = []
     total_chart_bytes = 0
     for index, figure_number in enumerate(plt.get_fignums(), start=1):
@@ -156,6 +336,7 @@ try:
         "status": "success",
         "stdout": stdout_capture.getvalue().strip(),
         "numeric_results": numeric_results,
+        "data_changes": data_changes,
         "charts": chart_data,
         "error": None,
     }, allow_nan=False))
@@ -165,6 +346,7 @@ except Exception as exc:
         "status": "error",
         "stdout": stdout_capture.getvalue().strip(),
         "numeric_results": {},
+        "data_changes": data_changes,
         "charts": [],
         "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
     }))
@@ -394,6 +576,7 @@ class CodeExecutionRunner:
                 recoverable=True,
             ) | {
                 "stdout": payload_result.get("stdout", ""),
+                "data_changes": payload_result.get("data_changes", []),
             }
 
         chart_paths = []
@@ -423,6 +606,7 @@ class CodeExecutionRunner:
             "status": "success",
             "stdout": payload_result.get("stdout", ""),
             "numeric_results": payload_result.get("numeric_results", {}),
+            "data_changes": payload_result.get("data_changes", []),
             "chart_path": chart_paths[0] if chart_paths else None,
             "chart_paths": chart_paths,
             "error": None,
