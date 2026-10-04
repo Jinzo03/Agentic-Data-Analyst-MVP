@@ -70,6 +70,17 @@ class DataProfiler:
             numeric_cols,
             categorical_cols,
         )
+        advanced_diagnostics = self._advanced_diagnostics(
+            numeric_cols,
+            columns_profile,
+            [
+                col[1]
+                for col in schema_info
+                if "DATE" in col[2].upper()
+                or "TIME" in col[2].upper()
+                or any(token in col[1].lower() for token in ("date", "time", "timestamp"))
+            ],
+        )
 
         return {
             "summary": {
@@ -80,6 +91,105 @@ class DataProfiler:
             },
             "column_diagnostics": columns_profile,
             "variance_homogeneity_checks": variance_checks,
+            "advanced_diagnostics": advanced_diagnostics,
+        }
+
+    def _advanced_diagnostics(
+        self,
+        numeric_cols: list[str],
+        columns_profile: dict[str, dict[str, Any]],
+        time_cols: list[str],
+    ) -> dict[str, Any]:
+        """Add descriptive diagnostics while avoiding unsupported assumptions."""
+        zero_inflation: list[dict[str, Any]] = []
+        for name in numeric_cols:
+            details = columns_profile.get(name, {})
+            frame = self.con.execute(
+                f'SELECT "{name}" FROM {self.table_name}'
+            ).fetchdf()
+            values = pd.to_numeric(frame[name], errors="coerce").dropna()
+            if len(values) and (values >= 0).all() and np.allclose(values, np.round(values)):
+                zero_count = int((values == 0).sum())
+                zero_inflation.append({
+                    "column": name,
+                    "zero_count": zero_count,
+                    "zero_percentage": round(zero_count / len(values) * 100, 2),
+                    "note": "A high zero rate is a flag for review, not a zero-inflation test.",
+                })
+
+        vif_results: list[dict[str, Any]] = []
+        if len(numeric_cols) >= 2:
+            frame = self.con.execute(
+                "SELECT " + ", ".join(f'"{name}"' for name in numeric_cols)
+                + f" FROM {self.table_name}"
+            ).fetchdf()
+            frame = frame.apply(pd.to_numeric, errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna()
+            usable = [name for name in numeric_cols if frame[name].nunique() > 1]
+            if len(usable) >= 2 and len(frame) > len(usable) + 1:
+                corr = frame[usable].corr().to_numpy()
+                inverse = np.linalg.pinv(corr)
+                vif_results = [
+                    {"column": name, "vif": round(float(inverse[i, i]), 4)}
+                    for i, name in enumerate(usable)
+                ]
+
+        missingness = {
+            name: {
+                "missing_count": details.get("null_count", 0),
+                "missing_percentage": details.get("null_percentage", 0.0),
+            }
+            for name, details in columns_profile.items()
+            if details.get("null_count", 0)
+        }
+        autocorrelation: dict[str, Any] = {
+            "status": "not_tested",
+            "note": "No time/order column was identified; row order alone is not treated as time.",
+            "results": [],
+        }
+        if time_cols:
+            temporal_results = []
+            time_col = time_cols[0]
+            for name in numeric_cols:
+                frame = self.con.execute(
+                    f'SELECT "{time_col}", "{name}" FROM {self.table_name}'
+                ).fetchdf()
+                frame[time_col] = pd.to_datetime(frame[time_col], errors="coerce")
+                frame[name] = pd.to_numeric(frame[name], errors="coerce")
+                frame = frame.dropna().sort_values(time_col)
+                values = frame[name].to_numpy(dtype=float)
+                if len(values) < 4 or np.ptp(values) == 0:
+                    continue
+                positions = np.arange(len(values), dtype=float)
+                residuals = values - np.polyval(np.polyfit(positions, values, 1), positions)
+                denominator = float(np.dot(residuals, residuals))
+                if denominator > 0:
+                    dw = float(np.sum(np.diff(residuals) ** 2) / denominator)
+                    temporal_results.append({
+                        "column": name,
+                        "time_column": time_col,
+                        "durbin_watson_trend_residuals": round(dw, 4),
+                        "observations": len(values),
+                        "note": "Exploratory linear-trend residual diagnostic; model residuals may be more appropriate.",
+                    })
+            autocorrelation = {
+                "status": "screened_with_time_column" if temporal_results else "not_tested_insufficient_usable_data",
+                "results": temporal_results,
+            }
+
+        return {
+            "multicollinearity_vif": {
+                "results": vif_results,
+                "interpretation": "Screening diagnostic; interpret VIF in model context.",
+            },
+            "integer_nonnegative_zero_rates": zero_inflation,
+            "missingness_summary": missingness,
+            "missingness_mechanism": {
+                "status": "not_identifiable_from_observed_data_alone",
+                "note": "MCAR/MAR/MNAR require study-design knowledge or additional assumptions; no mechanism is inferred.",
+            },
+            "autocorrelation": autocorrelation,
         }
 
     def _analyze_numeric_column(

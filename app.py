@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,29 @@ PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "output"
 MAX_CODE_REFINEMENTS = 2
 MAX_HISTORY_MESSAGES = 12
+
+DATA_HANDLING_PATTERNS = {
+    "null removal": r"\.dropna\s*\(",
+    "null imputation": r"\.(?:fillna|interpolate)\s*\(",
+    "row filtering": r"\.(?:query|where)\s*\(|\.loc\s*\[[^\]]*(?:>|<|==|!=|>=|<=)",
+    "outlier filtering": r"(?:outlier|isolationforest|localoutlierfactor|winsor)",
+}
+
+
+def review_data_handling(initial_code: str, final_code: str) -> list[dict[str, Any]]:
+    """Flag common data-cleaning operations for human review, not as proof of change."""
+    findings = []
+    for label, pattern in DATA_HANDLING_PATTERNS.items():
+        present = bool(re.search(pattern, final_code, flags=re.IGNORECASE))
+        existed_before = bool(re.search(pattern, initial_code, flags=re.IGNORECASE))
+        if present:
+            findings.append({
+                "operation": label,
+                "present_in_final_code": True,
+                "introduced_during_refinement": bool(initial_code) and not existed_before,
+                "note": "Review the executed code and DATA HANDLING output to confirm scope and impact.",
+            })
+    return findings
 
 st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
 st.title("Agentic Data Analyst")
@@ -68,6 +92,7 @@ def run_analysis_turn(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     attempt_history: list[dict[str, Any]] = []
+    initial_code = generated["code"]
     refinement_count = 0
     runner = CodeExecutionRunner(data_path, output_dir=str(OUTPUT_DIR))
     try:
@@ -119,6 +144,10 @@ def run_analysis_turn(
         "generated": generated,
         "attempts": attempt_history,
         "refinement_count": refinement_count,
+        "profile_diagnostics": profile_report.get("advanced_diagnostics", {}),
+        "data_handling_review": review_data_handling(
+            initial_code, generated.get("code", "")
+        ),
     }
 
     if execution["status"] != "success":
@@ -203,6 +232,13 @@ def render_message(message: dict[str, Any]) -> None:
                 f"{audit['refinement_count']} automatic code repair(s)."
             )
 
+        for item in audit.get("data_handling_review", []):
+            if item.get("introduced_during_refinement"):
+                st.warning(
+                    f"Auto-refinement introduced code for {item['operation']}. "
+                    "Review its scope and impact in Analysis details."
+                )
+
         if message.get("error"):
             for index, attempt in enumerate(audit.get("attempts", []), start=1):
                 with st.expander(f"Attempt {index}: code and traceback"):
@@ -226,6 +262,13 @@ def render_message(message: dict[str, Any]) -> None:
 
         generated = audit.get("generated", {})
         with st.expander("Analysis details", expanded=False):
+            diagnostics = audit.get("profile_diagnostics", {})
+            if diagnostics:
+                st.markdown("**Preflight methodology diagnostics**")
+                st.json(diagnostics)
+            if audit.get("data_handling_review"):
+                st.markdown("**Data handling operations to review**")
+                st.json(audit["data_handling_review"])
             if generated.get("plan"):
                 st.markdown("**Analysis plan**")
                 st.markdown(generated["plan"])
