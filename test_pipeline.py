@@ -53,7 +53,19 @@ def run_pipeline() -> int:
 
         # Both clients read GEMINI_API_KEY from the project .env file.
         agent = AgenticDataAnalyst()
-        generated = agent.generate_analysis_code(USER_QUERY, profile_report)
+        method_selection = agent.select_method(USER_QUERY, profile_report)
+        if method_selection["clarification_needed"]:
+            print("Method selection needs clarification:")
+            print(method_selection["clarification_question"])
+            return 2
+
+        print("=== METHOD SELECTION ===")
+        print(method_selection)
+        generated = agent.generate_analysis_code(
+            USER_QUERY,
+            profile_report,
+            method_plan=method_selection,
+        )
         if not generated["code"].strip():
             raise RuntimeError(
                 "Gemini did not return a fenced Python code block. "

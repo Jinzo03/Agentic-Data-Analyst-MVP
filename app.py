@@ -76,10 +76,34 @@ def run_analysis_turn(
 ) -> dict[str, Any]:
     """Generate, execute, optionally repair, report, and verify one chat turn."""
     agent = AgenticDataAnalyst()
+    method_selection = agent.select_method(
+        user_query,
+        profile_report,
+        conversation_history=conversation_history,
+    )
+    if method_selection["clarification_needed"]:
+        question = str(method_selection.get("clarification_question", "")).strip()
+        if not question:
+            question = (
+                "I need one more detail to choose an appropriate analysis method. "
+                "What outcome or study-design detail should I use?"
+            )
+        return {
+            "role": "assistant",
+            "content": question,
+            "context": (
+                "Method selection is waiting for the user's clarification.\n"
+                + json.dumps(method_selection, ensure_ascii=False, indent=2, default=str)
+            ),
+            "audit": {"method_selection": method_selection},
+            "needs_clarification": True,
+        }
+
     generated = agent.generate_analysis_code(
         user_query,
         profile_report,
         conversation_history=conversation_history,
+        method_plan=method_selection,
     )
     if not generated["code"].strip():
         return {
@@ -87,7 +111,11 @@ def run_analysis_turn(
             "content": "I couldn't produce executable analysis code for that request.",
             "context": generated["raw_response"],
             "error": generated["raw_response"],
-            "audit": {"generated": generated, "attempts": []},
+            "audit": {
+                "generated": generated,
+                "method_selection": method_selection,
+                "attempts": [],
+            },
         }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,6 +151,7 @@ def run_analysis_turn(
                     conversation_history=conversation_history,
                     previous_code=failed_code,
                     error_trace=failed_trace,
+                    method_plan=method_selection,
                 )
             except Exception as refinement_error:
                 execution["error"] = (
@@ -142,6 +171,7 @@ def run_analysis_turn(
 
     audit: dict[str, Any] = {
         "generated": generated,
+        "method_selection": method_selection,
         "attempts": attempt_history,
         "refinement_count": refinement_count,
         "profile_diagnostics": profile_report.get("advanced_diagnostics", {}),
@@ -217,6 +247,8 @@ def render_message(message: dict[str, Any]) -> None:
         st.markdown(message["content"])
         if message["role"] != "assistant":
             return
+        if message.get("needs_clarification"):
+            st.info("I need this detail before choosing the analysis method.")
 
         audit = message.get("audit", {})
         verification = audit.get("verification")
@@ -269,6 +301,10 @@ def render_message(message: dict[str, Any]) -> None:
 
         generated = audit.get("generated", {})
         with st.expander("Analysis details", expanded=False):
+            method_selection = audit.get("method_selection")
+            if method_selection:
+                st.markdown("**Method-selection plan**")
+                st.json(method_selection)
             diagnostics = audit.get("profile_diagnostics", {})
             if diagnostics:
                 st.markdown("**Preflight methodology diagnostics**")
