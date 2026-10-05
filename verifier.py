@@ -163,7 +163,11 @@ Use these headings:
             def label_score(key: str, context: str) -> int:
                 key_tokens = [
                     token for token in tokens(key)
-                    if token not in {"metrics", "stdout", "metric", "result", "value"}
+                    if token not in {
+                        "metrics", "stdout", "metric", "result", "value",
+                        "data", "change",
+                    }
+                    and not token.isdigit()
                 ]
                 context_tokens = tokens(context)
                 # Semantic aliases for common prose labels.
@@ -171,6 +175,11 @@ Use these headings:
                     context_tokens.append("dataset")
                 if "sample" in context_tokens or "observation" in context_tokens:
                     context_tokens.append("row")
+                    context_tokens.append("dataset")
+                if "threshold" in context_tokens:
+                    context_tokens.append("significance")
+                if not all(token in context_tokens for token in key_tokens):
+                    return 0
                 positions = []
                 for token in key_tokens:
                     if token in context_tokens:

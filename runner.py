@@ -112,13 +112,29 @@ def record_data_change(operation, before, after):
         try:
             shared_columns = previous.columns.intersection(after.columns)
             common_index = previous.index.intersection(after.index)
-            left = previous.loc[common_index, shared_columns]
-            right = after.loc[common_index, shared_columns]
-            unequal = left.ne(right) & ~(left.isna() & right.isna())
-            entry["changed_cells"] = int(unequal.to_numpy().sum())
+            if not previous.index.is_unique or not after.index.is_unique:
+                raise ValueError("duplicate index labels")
+            changed_cells = 0
+            for column in shared_columns:
+                for index_value in common_index:
+                    old_value = previous.at[index_value, column]
+                    new_value = after.at[index_value, column]
+                    old_missing = bool(pd.isna(old_value))
+                    new_missing = bool(pd.isna(new_value))
+                    if old_missing != new_missing:
+                        changed_cells += 1
+                    elif not old_missing:
+                        try:
+                            changed_cells += bool(old_value != new_value)
+                        except (TypeError, ValueError):
+                            changed_cells += repr(old_value) != repr(new_value)
+            entry["changed_cells"] = int(changed_cells)
             entry["value_comparison"] = "measured for rows and columns present before and after"
-        except (ValueError, TypeError, KeyError):
-            entry["value_comparison"] = "could not compare values because index/column alignment was ambiguous"
+        except (ValueError, TypeError, KeyError) as exc:
+            entry["value_comparison"] = (
+                "could not compare values because index/column alignment was ambiguous: "
+                f"{type(exc).__name__}"
+            )
     changed = (
         entry["rows_removed"] or entry["rows_added"]
         or entry["missing_cells_filled"] or entry["changed_cells"]
