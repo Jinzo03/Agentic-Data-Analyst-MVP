@@ -61,7 +61,7 @@ class NumericVerificationTest(unittest.TestCase):
         self.assertEqual(result["status"], "incomplete")
         self.assertEqual(result["unmatched_claims"], ["125.5"])
 
-    def test_unsupported_significance_claim_fails(self):
+    def test_significance_claim_without_p_value_is_incomplete(self):
         result = self.verifier.verify_report(
             "The result was statistically significant.",
             "group_mean: 10",
@@ -69,8 +69,38 @@ class NumericVerificationTest(unittest.TestCase):
         )
 
         self.assertFalse(result["verified"])
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "incomplete")
         self.assertTrue(any("UNVERIFIED SIGNIFICANCE" in item for item in result["violations"]))
+
+    def test_uses_labeled_runner_p_value_even_when_stdout_has_no_p_line(self):
+        result = self.verifier.verify_report(
+            "The p-value was 0.01, indicating a statistically significant result.",
+            "",
+            numeric_results={"metrics.p_value": 0.01},
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+
+    def test_accepts_a_number_rounded_to_its_reported_precision(self):
+        result = self.verifier.verify_report(
+            "Revenue mean: 17.35.",
+            "",
+            numeric_results={"revenue_mean": 17.345},
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+
+    def test_collapses_runner_aliases_for_the_same_labeled_metric(self):
+        result = self.verifier.verify_report(
+            "Group A mean: 12.5.",
+            "group_a_mean: 12.5",
+            numeric_results={
+                "metrics.group_a_mean": 12.5,
+                "stdout.group_a_mean": 12.5,
+            },
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
 
     def test_value_without_a_confident_metric_label_is_incomplete(self):
         result = self.verifier.verify_report(

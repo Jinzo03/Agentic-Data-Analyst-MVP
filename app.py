@@ -388,9 +388,11 @@ def render_message(message: dict[str, Any]) -> None:
                 st.success("Metric-aware numeric and statistical verification passed.")
             elif verification.get("status") == "incomplete":
                 st.warning(
-                    "Verification incomplete: some report numbers could not be "
-                    "matched confidently to their named metrics. Review the audit details."
+                    "Verification incomplete: one or more claims could not be "
+                    "checked confidently against runner output."
                 )
+                for violation in verification["violations"]:
+                    st.caption(violation)
             else:
                 st.error("Verification found unsupported or inconsistent claims.")
                 for violation in verification["violations"]:
@@ -506,6 +508,12 @@ def render_message(message: dict[str, Any]) -> None:
             if verification.get("matched_claims"):
                 st.markdown("**Report number to metric matches**")
                 st.json(verification["matched_claims"])
+            if verification.get("p_value_source"):
+                st.markdown("**Significance check source**")
+                st.json({
+                    "p_value": verification.get("p_value_used"),
+                    "source": verification["p_value_source"],
+                })
 
         if audit.get("refinement_count"):
             with st.expander("Auto-refinement history", expanded=False):

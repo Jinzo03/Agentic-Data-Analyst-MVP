@@ -153,11 +153,31 @@ Use these headings:
 
             collect_numbers(numeric_results)
 
+            # The runner intentionally exposes the same value through metrics,
+            # plain numeric variables, and labeled stdout. Collapse identical
+            # aliases so they do not create artificial ambiguity.
+            deduplicated_metrics: dict[tuple[str, float], str] = {}
+            for key, value in metric_items:
+                canonical = re.sub(r"^(?:metrics|stdout)\.", "", key, flags=re.IGNORECASE)
+                canonical = re.sub(r"[\s-]+", "_", canonical).casefold()
+                identity = (canonical.casefold(), value)
+                previous_key = deduplicated_metrics.get(identity)
+                if previous_key is None or key.startswith("metrics."):
+                    deduplicated_metrics[identity] = key
+            metric_items = [
+                (key, value)
+                for (canonical, value), key in deduplicated_metrics.items()
+            ]
+
             def tokens(text: str) -> list[str]:
                 found = re.findall(r"[a-z]+|[0-9]+", text.lower())
-                aliases = {"rows": "row", "means": "mean", "medians": "median",
-                           "values": "value", "rates": "rate", "deviations": "deviation",
-                           "datasets": "dataset"}
+                aliases = {
+                    "rows": "row", "means": "mean", "medians": "median",
+                    "values": "value", "rates": "rate", "deviations": "deviation",
+                    "datasets": "dataset", "average": "mean", "averages": "mean",
+                    "avg": "mean", "percentage": "rate", "percentages": "rate",
+                    "observations": "observation", "std": "standard", "sd": "standard",
+                }
                 return [aliases.get(token, token) for token in found]
 
             def label_score(key: str, context: str) -> int:
@@ -176,8 +196,8 @@ Use these headings:
                 if "sample" in context_tokens or "observation" in context_tokens:
                     context_tokens.append("row")
                     context_tokens.append("dataset")
-                if "threshold" in context_tokens:
-                    context_tokens.append("significance")
+                if "threshold" in context_tokens or "alpha" in context_tokens or "p" in context_tokens:
+                    context_tokens.extend(("significance", "threshold"))
                 if not all(token in context_tokens for token in key_tokens):
                     return 0
                 positions = []
@@ -196,6 +216,32 @@ Use these headings:
                 r"(?:[eE][+-]?\d+)?)(\s*%)?"
             )
 
+            def rounded_match(candidate: float, value: float, raw: str, is_percent: bool) -> bool:
+                if math.isclose(candidate, value, rel_tol=1e-8, abs_tol=1e-10):
+                    return True
+                mantissa = re.split(r"[eE]", raw.replace(",", ""), maxsplit=1)[0]
+                decimals = len(mantissa.partition(".")[2]) if "." in mantissa else 0
+                exponent_match = re.search(r"[eE]([+-]?\d+)$", raw)
+                exponent = int(exponent_match.group(1)) if exponent_match else 0
+                tolerance = 0.5 * (10.0 ** (exponent - decimals))
+                if is_percent:
+                    tolerance /= 100.0
+                return abs(candidate - value) <= tolerance + 1e-12
+
+            def claim_context(text: str, start: int, end: int) -> str:
+                separators = ("\n", ";", ",")
+                left = max(text.rfind(separator, 0, start) for separator in separators) + 1
+                right_candidates = [
+                    position
+                    for position in (text.find(separator, end) for separator in separators)
+                    if position >= 0
+                ]
+                sentence_end = text.find(". ", end)
+                if sentence_end >= 0:
+                    right_candidates.append(sentence_end)
+                right = min(right_candidates) if right_candidates else len(text)
+                return text[max(left, start - 70):min(right, end + 35)]
+
             for match in number_pattern.finditer(report_text):
                 raw_number = match.group(1)
                 candidate = float(raw_number.replace(",", ""))
@@ -204,14 +250,14 @@ Use these headings:
                 matching_metrics = [
                     (key, value)
                     for key, value in metric_items
-                    if math.isclose(candidate, value, rel_tol=1e-8, abs_tol=1e-10)
+                    if rounded_match(candidate, value, raw_number, bool(match.group(2)))
                 ]
                 if not matching_metrics:
                     unsupported_numbers.append(match.group(0).strip())
                     continue
 
                 # Use nearby prose as the claim label; never accept a value-only match.
-                context = report_text[max(0, match.start() - 90):min(len(report_text), match.end() + 45)]
+                context = claim_context(report_text, match.start(), match.end())
                 scored = [(label_score(key, context), key) for key, _ in matching_metrics]
                 best_score = max((score for score, _ in scored), default=0)
                 best_keys = [key for score, key in scored if score == best_score and score > 0]
@@ -235,12 +281,52 @@ Use these headings:
                     + ", ".join(dict.fromkeys(unmatched_claims))
                 )
 
+        # Prefer one clearly named test p-value from the runner JSON. Stdout is a
+        # fallback because generated code may print a p-value without adding it
+        # to metrics.
+        exact_p_values = [
+            value for key, value in metric_items
+            if re.search(r"(?:^|[._\s-])p[._\s-]*value$", key, re.IGNORECASE)
+            and not re.search(r"shapiro|levene|normality", key, re.IGNORECASE)
+            and 0.0 <= value <= 1.0
+        ]
+        all_labeled_p_values = [
+            value for key, value in metric_items
+            if re.search(r"(?:^|[._\s-])p(?:[._\s-]*(?:value|val))?$", key, re.IGNORECASE)
+            and 0.0 <= value <= 1.0
+        ]
         p_value_pattern = re.compile(
-            r"\b(?:p[\s_-]*value|p[\s_-]*val)\s*[:=]\s*"
+            r"\b(?:p[\s_-]*(?:value|val)|p)\s*(?:[:=]|\bis\b|\bof\b)\s*"
             r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
             re.IGNORECASE,
         )
-        p_match = p_value_pattern.search(stdout_text)
+        stdout_p_values = [
+            float(value) for value in p_value_pattern.findall(stdout_text)
+            if 0.0 <= float(value) <= 1.0
+        ]
+        p_candidates = list(dict.fromkeys(
+            exact_p_values or all_labeled_p_values or stdout_p_values
+        ))
+        p_value = p_candidates[0] if len(p_candidates) == 1 else None
+        p_value_source = None
+        if p_value is not None:
+            preferred_items = exact_p_values or all_labeled_p_values
+            if preferred_items:
+                p_value_source = next(
+                    (
+                        key for key, value in metric_items
+                        if value == p_value
+                        and re.search(r"(?:^|[._\s-])p(?:[._\s-]*(?:value|val))?$", key, re.IGNORECASE)
+                    ),
+                    "runner numeric results",
+                )
+            else:
+                p_value_source = "runner stdout"
+        p_bound_match = re.search(
+            r"\bp\s*(<|<=|>|>=)\s*((?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
+            stdout_text,
+            re.IGNORECASE,
+        )
 
         negative_claim_pattern = re.compile(
             r"\b(?:not|no|isn't|wasn't|is not|was not)\s+"
@@ -257,8 +343,7 @@ Use these headings:
             positive_claim_pattern.search(report_without_negative_claims)
         )
 
-        if p_match:
-            p_value = float(p_match.group(1))
+        if p_value is not None:
             if not 0.0 <= p_value <= 1.0:
                 violations.append(
                     f"INVALID P-VALUE: Captured p-value {p_value} is outside [0, 1]."
@@ -280,6 +365,20 @@ Use these headings:
                         "CONTRADICTORY CLAIMS: The report describes the result as both "
                         "significant and not significant."
                     )
+        elif p_bound_match:
+            comparator = p_bound_match.group(1)
+            bound = float(p_bound_match.group(2))
+            p_value_source = "runner stdout p-value bound"
+            bound_is_significant = comparator in {"<", "<="} and bound <= 0.05
+            bound_is_nonsignificant = comparator in {">", ">="} and bound >= 0.05
+            if bound_is_significant and has_negative_claim:
+                violations.append(
+                    "FALSE NEGATIVE: Runner output bounds p below 0.05, but the report says it is not significant."
+                )
+            if bound_is_nonsignificant and has_positive_claim:
+                violations.append(
+                    "FALSE POSITIVE: Runner output bounds p at or above 0.05, but the report says it is significant."
+                )
         elif has_positive_claim or has_negative_claim:
             violations.append(
                 "UNVERIFIED SIGNIFICANCE CLAIM: The report discusses significance, "
@@ -287,12 +386,15 @@ Use these headings:
             )
 
         incomplete_only = bool(violations) and all(
-            violation.startswith(("METRIC LABEL NOT CONFIDENT", "VERIFICATION INCOMPLETE"))
+            violation.startswith((
+                "METRIC LABEL NOT CONFIDENT", "VERIFICATION INCOMPLETE",
+                "UNVERIFIED SIGNIFICANCE CLAIM",
+            ))
             for violation in violations
         )
         status = (
             "failed" if violations and not incomplete_only
-            else "incomplete" if unmatched_claims
+            else "incomplete" if violations or unmatched_claims
             else "verified"
         )
         return {
@@ -307,4 +409,6 @@ Use these headings:
             "unsupported_numbers": list(dict.fromkeys(unsupported_numbers)),
             "unmatched_claims": list(dict.fromkeys(unmatched_claims)),
             "matched_claims": matched_claims,
+            "p_value_used": p_value,
+            "p_value_source": p_value_source,
         }
