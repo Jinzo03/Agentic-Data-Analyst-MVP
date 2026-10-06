@@ -23,11 +23,13 @@ import base64
 import ast
 import contextlib
 import duckdb
+import importlib.metadata
 import io
 import json
 import math
 import numbers
 import os
+import platform
 from pathlib import Path
 import re
 import sys
@@ -39,6 +41,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+environment = {"python": platform.python_version(), "libraries": {}}
+for distribution in ("duckdb", "matplotlib", "numpy", "pandas", "scipy", "seaborn"):
+    try:
+        environment["libraries"][distribution] = importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        environment["libraries"][distribution] = None
 
 payload = json.load(sys.stdin)
 csv_suffix = payload.get("suffix", ".csv")
@@ -353,6 +362,7 @@ try:
         "stdout": stdout_capture.getvalue().strip(),
         "numeric_results": numeric_results,
         "data_changes": data_changes,
+        "environment": environment,
         "charts": chart_data,
         "error": None,
     }, allow_nan=False))
@@ -363,6 +373,7 @@ except Exception as exc:
         "stdout": stdout_capture.getvalue().strip(),
         "numeric_results": {},
         "data_changes": data_changes,
+        "environment": environment,
         "charts": [],
         "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
     }))
@@ -593,6 +604,7 @@ class CodeExecutionRunner:
             ) | {
                 "stdout": payload_result.get("stdout", ""),
                 "data_changes": payload_result.get("data_changes", []),
+                "environment": payload_result.get("environment", {}),
             }
 
         chart_paths = []
@@ -623,6 +635,7 @@ class CodeExecutionRunner:
             "stdout": payload_result.get("stdout", ""),
             "numeric_results": payload_result.get("numeric_results", {}),
             "data_changes": payload_result.get("data_changes", []),
+            "environment": payload_result.get("environment", {}),
             "chart_path": chart_paths[0] if chart_paths else None,
             "chart_paths": chart_paths,
             "error": None,

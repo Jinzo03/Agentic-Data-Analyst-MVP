@@ -1,9 +1,13 @@
 """Streamlit chat interface for iterative dataset analysis."""
 
 import hashlib
+import importlib.metadata
 import json
+import platform
 import re
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "output"
 MAX_CODE_REFINEMENTS = 2
 MAX_HISTORY_MESSAGES = 12
+RUNS_DIR = OUTPUT_DIR / "runs"
 
 DATA_HANDLING_PATTERNS = {
     "null removal": r"\.dropna\s*\(",
@@ -43,6 +48,92 @@ def review_data_handling(initial_code: str, final_code: str) -> list[dict[str, A
                 "note": "Review the executed code and DATA HANDLING output to confirm scope and impact.",
             })
     return findings
+
+
+def fingerprint_dataset(path: str) -> str:
+    """Return a streaming SHA-256 fingerprint for the exact uploaded file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as data_file:
+        for chunk in iter(lambda: data_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def host_library_versions() -> dict[str, Any]:
+    versions: dict[str, Any] = {"python": platform.python_version(), "libraries": {}}
+    for distribution in ("google-genai", "streamlit", "duckdb", "pandas"):
+        try:
+            versions["libraries"][distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions["libraries"][distribution] = None
+    return versions
+
+
+def chart_record_paths(paths: list[str]) -> list[str]:
+    recorded_paths = []
+    for chart_path in paths:
+        path = Path(chart_path)
+        try:
+            recorded_paths.append(str(path.resolve().relative_to(PROJECT_DIR)))
+        except ValueError:
+            recorded_paths.append(str(path))
+    return recorded_paths
+
+
+def write_run_record(
+    *,
+    run_id: str,
+    created_at: str,
+    user_query: str,
+    dataset_path: str,
+    dataset_sha256: str,
+    dataset_name: str | None,
+    method_selection: dict[str, Any],
+    generated: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    execution: dict[str, Any],
+    report: str | None,
+    verification: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Persist a self-contained record of an analysis turn without copying data."""
+    record_path = RUNS_DIR / f"{run_id}.json"
+    record = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "created_at_utc": created_at,
+        "question": user_query,
+        "dataset": {
+            "name": dataset_name,
+            "sha256": dataset_sha256,
+            "format": Path(dataset_path).suffix.lower().lstrip("."),
+        },
+        "method_selection": method_selection,
+        "reasoning_plan": generated.get("plan", ""),
+        "generated_code": generated.get("code", ""),
+        "attempts": attempts,
+        "environment": {
+            "analysis_sandbox": execution.get("environment", {}),
+            "application_host": host_library_versions(),
+        },
+        "execution": {
+            "status": execution.get("status"),
+            "stdout": execution.get("stdout", ""),
+            "error": execution.get("error"),
+            "numeric_results": execution.get("numeric_results", {}),
+            "data_changes": execution.get("data_changes", []),
+        },
+        "report": report,
+        "verification": verification,
+        "charts": chart_record_paths(execution.get("chart_paths", [])),
+    }
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    temporary_path = record_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False, default=str),
+        encoding="utf-8",
+    )
+    temporary_path.replace(record_path)
+    return {"run_id": run_id, "path": str(record_path), "created_at_utc": created_at}
 
 st.set_page_config(page_title="Agentic Data Analyst", layout="wide")
 st.title("Agentic Data Analyst")
@@ -73,6 +164,7 @@ def run_analysis_turn(
     profile_report: dict[str, Any],
     conversation_history: list[dict[str, str]],
     data_path: str,
+    dataset_name: str | None = None,
 ) -> dict[str, Any]:
     """Generate, execute, optionally repair, report, and verify one chat turn."""
     agent = AgenticDataAnalyst()
@@ -119,6 +211,9 @@ def run_analysis_turn(
         }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    dataset_sha256 = fingerprint_dataset(data_path)
+    run_id = uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat()
     attempt_history: list[dict[str, Any]] = []
     initial_code = generated["code"]
     refinement_count = 0
@@ -181,6 +276,24 @@ def run_analysis_turn(
         ),
     }
 
+    try:
+        audit["reproducibility_record"] = write_run_record(
+            run_id=run_id,
+            created_at=created_at,
+            user_query=user_query,
+            dataset_path=data_path,
+            dataset_sha256=dataset_sha256,
+            dataset_name=dataset_name,
+            method_selection=method_selection,
+            generated=generated,
+            attempts=attempt_history,
+            execution=execution,
+            report=None,
+            verification=None,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        audit["reproducibility_record_error"] = f"{type(exc).__name__}: {exc}"
+
     if execution["status"] != "success":
         error_text = execution["error"] or "The isolated runner returned an unknown error."
         return {
@@ -216,6 +329,24 @@ def run_analysis_turn(
             "verification": verification,
         }
     )
+    try:
+        audit["reproducibility_record"] = write_run_record(
+            run_id=run_id,
+            created_at=created_at,
+            user_query=user_query,
+            dataset_path=data_path,
+            dataset_sha256=dataset_sha256,
+            dataset_name=dataset_name,
+            method_selection=method_selection,
+            generated=generated,
+            attempts=attempt_history,
+            execution=execution,
+            report=report,
+            verification=verification,
+        )
+        audit.pop("reproducibility_record_error", None)
+    except (OSError, TypeError, ValueError) as exc:
+        audit["reproducibility_record_error"] = f"{type(exc).__name__}: {exc}"
     history_numeric_results = dict(list(numeric_results.items())[:100])
     numeric_context = json.dumps(
         history_numeric_results,
@@ -285,6 +416,22 @@ def render_message(message: dict[str, Any]) -> None:
                     st.code(attempt["error"] or "No traceback was captured.")
             if not audit.get("attempts"):
                 st.code(message["error"])
+            record_info = audit.get("reproducibility_record", {})
+            record_path = Path(record_info.get("path", ""))
+            if record_path.is_file():
+                st.caption(f"Reproducibility record saved at {record_path}")
+                st.download_button(
+                    "Download run record",
+                    data=record_path.read_bytes(),
+                    file_name=record_path.name,
+                    mime="application/json",
+                    key=f"download_failed_run_{record_info['run_id']}",
+                )
+            elif audit.get("reproducibility_record_error"):
+                st.warning(
+                    "Could not save the reproducibility record: "
+                    + audit["reproducibility_record_error"]
+                )
             return
 
         chart_paths = [
@@ -301,6 +448,27 @@ def render_message(message: dict[str, Any]) -> None:
 
         generated = audit.get("generated", {})
         with st.expander("Analysis details", expanded=False):
+            record_info = audit.get("reproducibility_record", {})
+            record_path = Path(record_info.get("path", ""))
+            if record_path.is_file():
+                st.markdown("**Reproducibility record**")
+                try:
+                    shown_path = record_path.relative_to(PROJECT_DIR)
+                except ValueError:
+                    shown_path = record_path
+                st.caption(f"Saved locally: {shown_path}")
+                st.download_button(
+                    "Download run record",
+                    data=record_path.read_bytes(),
+                    file_name=record_path.name,
+                    mime="application/json",
+                    key=f"download_run_{record_info['run_id']}",
+                )
+            elif audit.get("reproducibility_record_error"):
+                st.warning(
+                    "Could not save the reproducibility record: "
+                    + audit["reproducibility_record_error"]
+                )
             method_selection = audit.get("method_selection")
             if method_selection:
                 st.markdown("**Method-selection plan**")
@@ -448,6 +616,7 @@ else:
                     st.session_state["profile_report"],
                     conversation_history,
                     st.session_state["dataset_path"],
+                    dataset_name=st.session_state["dataset_name"],
                 )
             except Exception as exc:
                 response_message = {
