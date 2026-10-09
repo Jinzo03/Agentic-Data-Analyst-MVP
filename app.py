@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pandas as pd
 import streamlit as st
 
 from agent import AgenticDataAnalyst
@@ -123,6 +124,7 @@ def write_run_record(
     execution: dict[str, Any],
     report: str | None,
     verification: dict[str, Any] | None,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist a self-contained record of an analysis turn without copying data."""
     record_path = RUNS_DIR / f"{run_id}.json"
@@ -142,6 +144,7 @@ def write_run_record(
         "reasoning_plan": generated.get("plan", ""),
         "generated_code": generated.get("code", ""),
         "attempts": attempts,
+        "settings": settings or {},
         "environment": {
             "analysis_sandbox": execution.get("environment", {}),
             "application_host": application_environment,
@@ -171,7 +174,10 @@ st.title("Agentic Data Analyst")
 st.subheader("Conversational data analysis with statistical verification")
 
 
-def profile_dataset(path: str) -> dict[str, Any]:
+def profile_dataset(
+    path: str,
+    alpha: float = 0.05,
+) -> tuple[dict[str, Any], pd.DataFrame]:
     """Profile the selected CSV or Parquet file once per uploaded dataset."""
     connection = duckdb.connect(database=":memory:")
     try:
@@ -185,7 +191,12 @@ def profile_dataset(path: str) -> dict[str, Any]:
                 "CREATE TABLE dataset AS SELECT * FROM read_csv_auto(?)",
                 [path],
             )
-        return DataProfiler(connection).run_preflight_check()
+        preview = connection.execute(
+            "SELECT * FROM dataset LIMIT 5"
+        ).fetchdf()
+        profile = DataProfiler(connection, alpha=alpha).run_preflight_check()
+        profile["settings"] = {"alpha": alpha}
+        return profile, preview
     finally:
         connection.close()
 
@@ -196,6 +207,9 @@ def run_analysis_turn(
     conversation_history: list[dict[str, str]],
     data_path: str,
     dataset_name: str | None = None,
+    *,
+    max_code_refinements: int = MAX_CODE_REFINEMENTS,
+    alpha: float = 0.05,
 ) -> dict[str, Any]:
     """Generate, execute, optionally repair, report, and verify one chat turn."""
     agent = AgenticDataAnalyst()
@@ -218,7 +232,13 @@ def run_analysis_turn(
                 "Method selection is waiting for the user's clarification.\n"
                 + json.dumps(method_selection, ensure_ascii=False, indent=2, default=str)
             ),
-            "audit": {"method_selection": method_selection},
+            "audit": {
+                "method_selection": method_selection,
+                "settings": {
+                    "max_code_refinements": max_code_refinements,
+                    "alpha": alpha,
+                },
+            },
             "needs_clarification": True,
         }
 
@@ -238,6 +258,10 @@ def run_analysis_turn(
                 "generated": generated,
                 "method_selection": method_selection,
                 "attempts": [],
+                "settings": {
+                    "max_code_refinements": max_code_refinements,
+                    "alpha": alpha,
+                },
             },
         }
 
@@ -264,7 +288,7 @@ def run_analysis_turn(
                 break
             if not execution.get("recoverable", True):
                 break
-            if refinement_count >= MAX_CODE_REFINEMENTS:
+            if refinement_count >= max_code_refinements:
                 break
 
             failed_code = generated["code"]
@@ -300,6 +324,10 @@ def run_analysis_turn(
         "method_selection": method_selection,
         "attempts": attempt_history,
         "refinement_count": refinement_count,
+        "settings": {
+            "max_code_refinements": max_code_refinements,
+            "alpha": alpha,
+        },
         "profile_diagnostics": profile_report.get("advanced_diagnostics", {}),
         "data_changes": execution.get("data_changes", []),
         "data_handling_review": review_data_handling(
@@ -321,6 +349,7 @@ def run_analysis_turn(
             execution=execution,
             report=None,
             verification=None,
+            settings=audit["settings"],
         )
     except (OSError, TypeError, ValueError) as exc:
         audit["reproducibility_record_error"] = f"{type(exc).__name__}: {exc}"
@@ -374,6 +403,7 @@ def run_analysis_turn(
             execution=execution,
             report=report,
             verification=verification,
+            settings=audit["settings"],
         )
         audit.pop("reproducibility_record_error", None)
     except (OSError, TypeError, ValueError) as exc:
@@ -506,6 +536,9 @@ def render_message(message: dict[str, Any]) -> None:
             if method_selection:
                 st.markdown("**Method-selection plan**")
                 st.json(method_selection)
+            if audit.get("settings"):
+                st.markdown("**Analysis settings**")
+                st.json(audit["settings"])
             diagnostics = audit.get("profile_diagnostics", {})
             if diagnostics:
                 st.markdown("**Preflight methodology diagnostics**")
@@ -564,6 +597,8 @@ for state_key, initial_value in (
     ("dataset_name", None),
     ("dataset_hash", None),
     ("profile_report", None),
+    ("dataset_preview", None),
+    ("profile_alpha", None),
 ):
     if state_key not in st.session_state:
         st.session_state[state_key] = initial_value
@@ -583,6 +618,25 @@ with st.sidebar:
             on_click=clear_conversation,
             width="stretch",
         )
+    max_code_refinements = st.slider(
+        "Maximum code refinements",
+        min_value=0,
+        max_value=5,
+        value=MAX_CODE_REFINEMENTS,
+        step=1,
+        help="Maximum automatic repair attempts after generated code fails.",
+        key="max_code_refinements_setting",
+    )
+    alpha = st.slider(
+        "Significance level (alpha)",
+        min_value=0.001,
+        max_value=0.2,
+        value=0.05,
+        step=0.001,
+        format="%.3f",
+        help="Used by profiler hypothesis-test diagnostics and recommendations.",
+        key="alpha_setting",
+    )
 
 
 if uploaded_file is not None:
@@ -596,7 +650,7 @@ if uploaded_file is not None:
 
         try:
             with st.spinner("Profiling this dataset for the conversation..."):
-                new_profile = profile_dataset(new_data_path)
+                new_profile, new_preview = profile_dataset(new_data_path, alpha=alpha)
         except Exception as exc:
             Path(new_data_path).unlink(missing_ok=True)
             st.error(f"Could not load or profile the dataset: {exc}")
@@ -609,7 +663,26 @@ if uploaded_file is not None:
         st.session_state["dataset_name"] = uploaded_file.name
         st.session_state["dataset_hash"] = upload_hash
         st.session_state["profile_report"] = new_profile
+        st.session_state["dataset_preview"] = new_preview
+        st.session_state["profile_alpha"] = alpha
         st.session_state["chat_messages"] = []
+
+if (
+    st.session_state["dataset_path"] is not None
+    and st.session_state["profile_alpha"] != alpha
+):
+    try:
+        with st.spinner("Updating profiler diagnostics for the selected alpha..."):
+            updated_profile, updated_preview = profile_dataset(
+                st.session_state["dataset_path"],
+                alpha=alpha,
+            )
+    except Exception as exc:
+        st.error(f"Could not update the dataset profile: {exc}")
+        st.stop()
+    st.session_state["profile_report"] = updated_profile
+    st.session_state["dataset_preview"] = updated_preview
+    st.session_state["profile_alpha"] = alpha
 
 
 if st.session_state["dataset_path"] is None:
@@ -622,6 +695,12 @@ else:
         f"{summary.get('total_columns', '?')} columns. "
         "Upload a different file whenever you want to change the data."
     )
+    preview = st.session_state.get("dataset_preview")
+    if preview is not None:
+        st.subheader("Dataset preview")
+        st.dataframe(preview, hide_index=True, width="stretch")
+    with st.expander("Dataset profile (JSON)", expanded=False):
+        st.json(st.session_state["profile_report"])
 
     if not st.session_state["chat_messages"]:
         with st.chat_message("assistant"):
@@ -656,6 +735,8 @@ else:
                     conversation_history,
                     st.session_state["dataset_path"],
                     dataset_name=st.session_state["dataset_name"],
+                    max_code_refinements=max_code_refinements,
+                    alpha=alpha,
                 )
             except Exception as exc:
                 response_message = {
