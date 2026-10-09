@@ -5,6 +5,8 @@ import importlib.metadata
 import json
 import platform
 import re
+import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -69,6 +71,33 @@ def host_library_versions() -> dict[str, Any]:
     return versions
 
 
+def pip_freeze_snapshot() -> str:
+    """Capture installed app dependencies, redacting credentials in direct URLs."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"# pip freeze unavailable: {type(exc).__name__}"
+    if result.returncode != 0:
+        return f"# pip freeze failed with exit code {result.returncode}"
+
+    lines = []
+    for line in result.stdout.splitlines():
+        line = re.sub(r"(?i)(https?://)[^\s/@]+(?::[^\s/@]*)?@", r"\1<redacted>@", line)
+        line = re.sub(
+            r"(?i)([?&](?:token|key|password|auth|access_token)=)[^&#\s]+",
+            r"\1<redacted>",
+            line,
+        )
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def chart_record_paths(paths: list[str]) -> list[str]:
     recorded_paths = []
     for chart_path in paths:
@@ -97,6 +126,8 @@ def write_run_record(
 ) -> dict[str, Any]:
     """Persist a self-contained record of an analysis turn without copying data."""
     record_path = RUNS_DIR / f"{run_id}.json"
+    application_environment = host_library_versions()
+    application_environment["pip_freeze"] = pip_freeze_snapshot()
     record = {
         "schema_version": 1,
         "run_id": run_id,
@@ -113,7 +144,7 @@ def write_run_record(
         "attempts": attempts,
         "environment": {
             "analysis_sandbox": execution.get("environment", {}),
-            "application_host": host_library_versions(),
+            "application_host": application_environment,
         },
         "execution": {
             "status": execution.get("status"),

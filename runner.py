@@ -33,6 +33,7 @@ import platform
 from pathlib import Path
 import re
 import sys
+import subprocess
 import tempfile
 import traceback
 
@@ -48,6 +49,20 @@ for distribution in ("duckdb", "matplotlib", "numpy", "pandas", "scipy", "seabor
         environment["libraries"][distribution] = importlib.metadata.version(distribution)
     except importlib.metadata.PackageNotFoundError:
         environment["libraries"][distribution] = None
+try:
+    freeze_result = subprocess.run(
+        [sys.executable, "-m", "pip", "freeze"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if freeze_result.returncode == 0:
+        environment["pip_freeze"] = freeze_result.stdout.strip()
+    else:
+        environment["pip_freeze"] = f"# pip freeze failed with exit code {freeze_result.returncode}"
+except (OSError, subprocess.TimeoutExpired) as exc:
+    environment["pip_freeze"] = f"# pip freeze unavailable: {type(exc).__name__}"
 
 payload = json.load(sys.stdin)
 csv_suffix = payload.get("suffix", ".csv")
