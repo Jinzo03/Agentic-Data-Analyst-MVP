@@ -4,6 +4,8 @@ import numpy as np
 from scipy import stats
 from typing import Any
 
+PROFILE_SAMPLE_ROWS = 10_000
+
 
 class DataProfiler:
     def __init__(
@@ -19,13 +21,19 @@ class DataProfiler:
     def run_preflight_check(self) -> dict[str, Any]:
         """Generate a dataset profile and basic statistical diagnostics."""
 
+        schema_info = self.con.execute(
+            f"PRAGMA table_info('{self.table_name}')"
+        ).fetchall()
         row_count = self.con.execute(
             f"SELECT COUNT(*) FROM {self.table_name}"
         ).fetchone()[0]
 
-        schema_info = self.con.execute(
-            f"PRAGMA table_info('{self.table_name}')"
-        ).fetchall()
+        # Fetch all columns in one bounded sample, then reuse it for every
+        # per-column and cross-column diagnostic.
+        profile_frame = self.con.execute(
+            f"SELECT * FROM {self.table_name} "
+            f"USING SAMPLE reservoir({PROFILE_SAMPLE_ROWS} ROWS)"
+        ).fetchdf()
 
         columns_profile: dict[str, dict[str, Any]] = {}
         numeric_cols: list[str] = []
@@ -35,14 +43,12 @@ class DataProfiler:
             col_name = col[1]
             col_type = col[2].upper()
 
-            series = self.con.execute(
-                f'SELECT "{col_name}" FROM {self.table_name}'
-            ).fetchdf()[col_name]
+            series = profile_frame[col_name]
 
             null_count = int(series.isna().sum())
             null_percentage = round(
-                (null_count / row_count) * 100, 2
-            ) if row_count else 0.0
+                (null_count / len(profile_frame)) * 100, 2
+            ) if len(profile_frame) else 0.0
 
             clean_series = series.dropna()
 
@@ -67,10 +73,12 @@ class DataProfiler:
                 )
 
         variance_checks = self._check_variances(
+            profile_frame,
             numeric_cols,
             categorical_cols,
         )
         advanced_diagnostics = self._advanced_diagnostics(
+            profile_frame,
             numeric_cols,
             columns_profile,
             [
@@ -86,6 +94,8 @@ class DataProfiler:
             "summary": {
                 "total_rows": int(row_count),
                 "total_columns": len(schema_info),
+                "diagnostic_sample_size": len(profile_frame),
+                "diagnostics_sampled": row_count > len(profile_frame),
                 "numeric_columns": numeric_cols,
                 "categorical_columns": categorical_cols,
             },
@@ -96,6 +106,7 @@ class DataProfiler:
 
     def _advanced_diagnostics(
         self,
+        profile_frame: pd.DataFrame,
         numeric_cols: list[str],
         columns_profile: dict[str, dict[str, Any]],
         time_cols: list[str],
@@ -104,10 +115,7 @@ class DataProfiler:
         zero_inflation: list[dict[str, Any]] = []
         for name in numeric_cols:
             details = columns_profile.get(name, {})
-            frame = self.con.execute(
-                f'SELECT "{name}" FROM {self.table_name}'
-            ).fetchdf()
-            values = pd.to_numeric(frame[name], errors="coerce").dropna()
+            values = pd.to_numeric(profile_frame[name], errors="coerce").dropna()
             if len(values) and (values >= 0).all() and np.allclose(values, np.round(values)):
                 zero_count = int((values == 0).sum())
                 zero_inflation.append({
@@ -119,10 +127,7 @@ class DataProfiler:
 
         vif_results: list[dict[str, Any]] = []
         if len(numeric_cols) >= 2:
-            frame = self.con.execute(
-                "SELECT " + ", ".join(f'"{name}"' for name in numeric_cols)
-                + f" FROM {self.table_name}"
-            ).fetchdf()
+            frame = profile_frame[numeric_cols].copy()
             frame = frame.apply(pd.to_numeric, errors="coerce").replace(
                 [np.inf, -np.inf], np.nan
             ).dropna()
@@ -152,9 +157,13 @@ class DataProfiler:
             temporal_results = []
             time_col = time_cols[0]
             for name in numeric_cols:
-                frame = self.con.execute(
-                    f'SELECT "{time_col}", "{name}" FROM {self.table_name}'
-                ).fetchdf()
+                # A numeric field named "time" can be selected as both the
+                # time axis and the measured variable. That creates duplicate
+                # dataframe labels and makes pandas.to_datetime treat the
+                # input as a year/month/day mapping.
+                if name == time_col:
+                    continue
+                frame = profile_frame[[time_col, name]].copy()
                 frame[time_col] = pd.to_datetime(frame[time_col], errors="coerce")
                 frame[name] = pd.to_numeric(frame[name], errors="coerce")
                 frame = frame.dropna().sort_values(time_col)
@@ -318,6 +327,7 @@ class DataProfiler:
 
     def _check_variances(
         self,
+        profile_frame: pd.DataFrame,
         numeric_cols: list[str],
         categorical_cols: list[str],
     ) -> list[dict[str, Any]]:
@@ -328,10 +338,7 @@ class DataProfiler:
         for cat_col in categorical_cols:
             for num_col in numeric_cols:
 
-                df = self.con.execute(
-                    f'SELECT "{cat_col}", "{num_col}" '
-                    f'FROM {self.table_name}'
-                ).fetchdf().dropna()
+                df = profile_frame[[cat_col, num_col]].dropna()
 
                 groups = [
                     group[num_col].to_numpy()
