@@ -22,9 +22,6 @@ class AgenticDataAnalyst:
         api_key: str | None = None,
         model: str = "gemini-3.8-flash",
         fallback_models: tuple[str, ...] = (
-            "gemini-3.7-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
             "gemini-2.5-flash",
         ),
     ) -> None:
