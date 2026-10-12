@@ -112,6 +112,42 @@ class NumericVerificationTest(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertEqual(result["status"], "incomplete")
 
+    def test_accepts_formatted_r_squared_and_conventional_small_p_value(self):
+        result = self.verifier.verify_report(
+            "Model R-squared ($R^2$): 0.361. F-test p-value: p < 0.001, "
+            "indicating a statistically significant model.",
+            "",
+            numeric_results={"r_squared": 0.36055, "f_p_value": 0.0},
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+        self.assertEqual(result["unsupported_numbers"], [])
+
+    def test_rejects_a_p_value_bound_that_conflicts_with_runner_metric(self):
+        result = self.verifier.verify_report(
+            "F-test p-value: p < 0.001.",
+            "",
+            numeric_results={"f_p_value": 0.02},
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("INCONSISTENT P-VALUE BOUND" in item for item in result["violations"]))
+
+    def test_matches_formatted_metric_table_cells_to_headers_and_rows(self):
+        report = """| Predictor | Coefficient | P-value |
+|---|---:|---:|
+| Alcohol | 0.276 | 0.001 |"""
+        result = self.verifier.verify_report(
+            report,
+            "",
+            numeric_results={
+                "coef_alcohol": 0.2762,
+                "p_alcohol": 0.001,
+            },
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+
 
 if __name__ == "__main__":
     unittest.main()
