@@ -272,7 +272,7 @@ def run_analysis_turn(
     attempt_history: list[dict[str, Any]] = []
     initial_code = generated["code"]
     refinement_count = 0
-    runner = CodeExecutionRunner(data_path, output_dir=str(OUTPUT_DIR))
+    runner = CodeExecutionRunner(data_path, output_dir=str(OUTPUT_DIR), alpha=alpha)
     try:
         while True:
             execution = runner.execute_python_code(generated["code"])
@@ -376,11 +376,13 @@ def run_analysis_turn(
         numeric_results=numeric_results,
         conversation_history=conversation_history,
         data_changes=execution.get("data_changes", []),
+        alpha=alpha,
     )
     verification = verifier.verify_report(
         report,
         execution["stdout"],
         numeric_results=numeric_results,
+        alpha=alpha,
     )
     audit.update(
         {
@@ -433,16 +435,102 @@ def run_analysis_turn(
     }
 
 
+def active_answer(message: dict[str, Any]) -> dict[str, Any]:
+    """Return the selected answer version for a chat message."""
+    versions = message.get("answer_versions")
+    if not versions:
+        return message
+    index = message.get("active_answer_index", len(versions) - 1)
+    index = max(0, min(int(index), len(versions) - 1))
+    message["active_answer_index"] = index
+    return versions[index]
+
+
+def set_active_answer(message_id: str, offset: int) -> None:
+    """Move between stored answer versions from a Streamlit callback."""
+    for message in st.session_state.get("chat_messages", []):
+        if message.get("turn_id") == message_id:
+            versions = message.get("answer_versions", [])
+            if versions:
+                current = int(message.get("active_answer_index", len(versions) - 1))
+                message["active_answer_index"] = max(
+                    0, min(current + offset, len(versions) - 1)
+                )
+            return
+
+
+def queue_answer_retry(message_id: str) -> None:
+    st.session_state["retry_answer_id"] = message_id
+
+
+def make_answer_version(message: dict[str, Any]) -> dict[str, Any]:
+    """Copy the user-visible response payload without its version metadata."""
+    metadata = {"answer_versions", "active_answer_index", "turn_id", "retry_context", "retry_error"}
+    return {key: value for key, value in message.items() if key not in metadata}
+
+
+def render_answer_controls(message: dict[str, Any], answer_count: int, active_index: int) -> None:
+    turn_id = message.get("turn_id")
+    if not turn_id:
+        return
+    has_retry = bool(message.get("retry_context")) and not message.get("needs_clarification")
+    if answer_count <= 1 and not has_retry:
+        return
+
+    previous_col, count_col, next_col, retry_col = st.columns([1.5, 1.0, 1.5, 2.0])
+    with previous_col:
+        if answer_count > 1:
+            st.button(
+                "‹",
+                key=f"answer_previous_{turn_id}",
+                help="Show the previous answer",
+                disabled=active_index <= 0,
+                icon=":material/chevron_left:",
+                on_click=set_active_answer,
+                args=(turn_id, -1),
+            )
+    with count_col:
+        if answer_count > 1:
+            st.caption(f"{active_index + 1} / {answer_count}")
+    with next_col:
+        if answer_count > 1:
+            st.button(
+                "›",
+                key=f"answer_next_{turn_id}",
+                help="Show the next answer",
+                disabled=active_index >= answer_count - 1,
+                icon=":material/chevron_right:",
+                on_click=set_active_answer,
+                args=(turn_id, 1),
+            )
+    with retry_col:
+        if has_retry:
+            st.button(
+                "Try again",
+                key=f"answer_retry_{turn_id}",
+                help="Generate another answer to this question",
+                icon=":material/refresh:",
+                on_click=queue_answer_retry,
+                args=(turn_id,),
+            )
+
+
 def render_message(message: dict[str, Any]) -> None:
     """Render one persisted chat turn and its analysis artifacts."""
+    display_message = active_answer(message) if message["role"] == "assistant" else message
+    versions = message.get("answer_versions", [])
+    active_index = int(message.get("active_answer_index", max(0, len(versions) - 1)))
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        st.markdown(display_message["content"])
         if message["role"] != "assistant":
             return
-        if message.get("needs_clarification"):
+        render_answer_controls(message, len(versions), active_index)
+        if message.get("retry_error"):
+            st.warning(f"Could not generate another answer: {message['retry_error']}")
+        if display_message.get("needs_clarification"):
             st.info("I need this detail before choosing the analysis method.")
 
-        audit = message.get("audit", {})
+        audit = display_message.get("audit", {})
         verification = audit.get("verification")
         if verification:
             if verification["verified"]:
@@ -472,13 +560,13 @@ def render_message(message: dict[str, Any]) -> None:
                     "Review its scope and impact in Analysis details."
                 )
 
-        if message.get("error"):
+        if display_message.get("error"):
             for index, attempt in enumerate(audit.get("attempts", []), start=1):
                 with st.expander(f"Attempt {index}: code and traceback"):
                     st.code(attempt["code"], language="python")
                     st.code(attempt["error"] or "No traceback was captured.")
             if not audit.get("attempts"):
-                st.code(message["error"])
+                st.code(display_message["error"])
             record_info = audit.get("reproducibility_record", {})
             record_path = Path(record_info.get("path", ""))
             if record_path.is_file():
@@ -498,7 +586,7 @@ def render_message(message: dict[str, Any]) -> None:
             return
 
         chart_paths = [
-            path for path in message.get("charts", []) if Path(path).is_file()
+            path for path in display_message.get("charts", []) if Path(path).is_file()
         ]
         if chart_paths:
             with st.expander("Visualizations", expanded=True):
@@ -589,6 +677,50 @@ def render_message(message: dict[str, Any]) -> None:
 
 def clear_conversation() -> None:
     st.session_state["chat_messages"] = []
+    st.session_state["retry_answer_id"] = None
+
+
+def process_queued_answer_retry() -> None:
+    """Generate and append another answer for a selected past assistant turn."""
+    turn_id = st.session_state.pop("retry_answer_id", None)
+    if not turn_id:
+        return
+
+    message = next(
+        (
+            item for item in st.session_state["chat_messages"]
+            if item.get("turn_id") == turn_id
+        ),
+        None,
+    )
+    if message is None or not st.session_state.get("dataset_path"):
+        return
+
+    retry_context = message.get("retry_context", {})
+    if retry_context.get("dataset_hash") != st.session_state.get("dataset_hash"):
+        message["retry_error"] = "The dataset changed; this answer can no longer be regenerated."
+        return
+
+    try:
+        with st.spinner("Generating another answer..."):
+            new_answer = run_analysis_turn(
+                retry_context["query"],
+                retry_context["profile_report"],
+                retry_context["conversation_history"],
+                st.session_state["dataset_path"],
+                dataset_name=st.session_state["dataset_name"],
+                max_code_refinements=retry_context["max_code_refinements"],
+                alpha=retry_context["alpha"],
+            )
+    except Exception as exc:
+        message["retry_error"] = f"{type(exc).__name__}: {exc}"
+        return
+
+    if not message.get("answer_versions"):
+        message["answer_versions"] = [make_answer_version(message)]
+    message["answer_versions"].append(make_answer_version(new_answer))
+    message["active_answer_index"] = len(message["answer_versions"]) - 1
+    message.pop("retry_error", None)
 
 
 for state_key, initial_value in (
@@ -599,6 +731,7 @@ for state_key, initial_value in (
     ("profile_report", None),
     ("dataset_preview", None),
     ("profile_alpha", None),
+    ("retry_answer_id", None),
 ):
     if state_key not in st.session_state:
         st.session_state[state_key] = initial_value
@@ -684,6 +817,8 @@ if (
     st.session_state["dataset_preview"] = updated_preview
     st.session_state["profile_alpha"] = alpha
 
+process_queued_answer_retry()
+
 
 if st.session_state["dataset_path"] is None:
     st.info("Upload a CSV or Parquet dataset to start a conversation.")
@@ -719,7 +854,11 @@ else:
         conversation_history = [
             {
                 "role": message["role"],
-                "content": message.get("context", message["content"]),
+                "content": (
+                    active_answer(message).get("context", active_answer(message)["content"])
+                    if message["role"] == "assistant"
+                    else message["content"]
+                ),
             }
             for message in prior_messages
         ]
@@ -746,5 +885,17 @@ else:
                     "error": f"{type(exc).__name__}: {exc}",
                     "audit": {},
                 }
+        if not response_message.get("needs_clarification"):
+            response_message["turn_id"] = uuid.uuid4().hex
+            response_message["answer_versions"] = [make_answer_version(response_message)]
+            response_message["active_answer_index"] = 0
+            response_message["retry_context"] = {
+                "query": prompt,
+                "conversation_history": conversation_history,
+                "profile_report": st.session_state["profile_report"],
+                "dataset_hash": st.session_state["dataset_hash"],
+                "max_code_refinements": max_code_refinements,
+                "alpha": alpha,
+            }
         st.session_state["chat_messages"].append(response_message)
         render_message(response_message)

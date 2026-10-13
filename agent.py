@@ -5,7 +5,6 @@ import os
 import re
 import warnings
 from typing import Any
-
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
@@ -51,7 +50,7 @@ Statistical requirements:
 6. Do not claim that a diagnostic proves normality, MCAR/MAR/MNAR, causality, or zero inflation. The profiler's missingness mechanism field is intentionally indeterminate; its VIF and zero-rate results are screening diagnostics.
 7. Never silently add or change row filters, null handling, imputation, outlier exclusions, variable selection, or statistical test parameters during auto-refinement. Preserve the original analysis choices. If a change is essential to make execution possible, quantify affected rows/columns and print a `DATA HANDLING:` explanation; explain why and state the impact on interpretation.
 8. Use only documented function names from the installed scientific libraries.
-9. Print every reported metric with a clear `name: value` line and add the same numeric value to the provided `metrics` dictionary, for example `metrics['group_a_mean'] = float(group_a.mean())`. Include sample sizes, test statistics, p-values, effect sizes, and any percentages or counts used in conclusions.
+9. The runner prepopulates `metrics['significance_threshold']` with the user's selected alpha. Use that value for significance decisions instead of hard-coding 0.05, and report the threshold when it affects a conclusion. Print every reported metric with a clear `name: value` line and add the same numeric value to `metrics`, for example `metrics['group_a_mean'] = float(group_a.mean())`. Include sample sizes, test statistics, p-values, effect sizes, and any percentages or counts used in conclusions.
 10. When a chart would help answer the request, create one or more clear Matplotlib figures using `plt`; the runner saves every open figure for the Streamlit dashboard. Leave figures open for the runner to capture them. Do not call `plt.show()`, `plt.close()`, or save the figures yourself.
 11. The isolated execution environment provides `con` (DuckDB connection), `pd` (Pandas), `np` (NumPy), `plt` (Matplotlib pyplot), `metrics` (a dictionary for numeric results), and `output_dir`. Installed packages are DuckDB, Matplotlib, NumPy, Pandas, SciPy, and Seaborn; network access is disabled.
 12. Each code run starts with a fresh Python process and DuckDB connection. Use conversation history to understand follow-ups, but query the current dataset again; do not rely on variables from earlier runs.
@@ -141,10 +140,19 @@ Rules:
                     )
                 if not isinstance(selection["clarification_needed"], bool):
                     raise ValueError("clarification_needed must be a JSON boolean.")
-                if not isinstance(selection["predictors"], list) or not isinstance(
-                    selection["assumptions_to_check"], list
-                ):
-                    raise ValueError("predictors and assumptions_to_check must be JSON arrays.")
+                for field in ("predictors", "assumptions_to_check"):
+                    value = selection[field]
+                    if value is None:
+                        value = []
+                    elif isinstance(value, str):
+                        value = [value] if value.strip() else []
+                    if not isinstance(value, list) or not all(
+                        isinstance(item, str) for item in value
+                    ):
+                        raise ValueError(
+                            f"{field} must be a JSON array of strings (or a single string)."
+                        )
+                    selection[field] = [item.strip() for item in value if item.strip()]
 
                 summary = profile_report.get("summary", {})
                 available_columns = list(dict.fromkeys(
@@ -190,6 +198,19 @@ Rules:
                 warnings.warn(
                     f"Gemini model {model_name} is unavailable; trying "
                     f"{models_to_try[index + 1]}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            except ValueError as exc:
+                last_error = exc
+                if index == len(models_to_try) - 1:
+                    raise RuntimeError(
+                        f"Gemini returned an invalid method-selection response from "
+                        f"{model_name}: {exc}"
+                    ) from exc
+                warnings.warn(
+                    f"Gemini model {model_name} returned an invalid method selection; "
+                    f"trying {models_to_try[index + 1]}.",
                     RuntimeWarning,
                     stacklevel=2,
                 )

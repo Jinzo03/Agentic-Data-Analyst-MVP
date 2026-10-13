@@ -73,6 +73,41 @@ class AgentMethodSelectionTest(unittest.TestCase):
         )
         self.assertEqual(request["recent_conversation"], history)
 
+    def test_single_string_predictor_and_assumption_are_normalized(self):
+        response = json.loads(self.response(False).text)
+        response["predictors"] = "period"
+        response["assumptions_to_check"] = "paired observations"
+        self.agent.client.models.generate_content.return_value = Mock(text=json.dumps(response))
+
+        selection = self.agent.select_method("Compare revenue", self.profile)
+
+        self.assertEqual(selection["predictors"], ["period"])
+        self.assertEqual(selection["assumptions_to_check"], ["paired observations"])
+
+    def test_invalid_array_shape_uses_fallback_model(self):
+        self.agent.fallback_models = ("fallback-model",)
+        malformed = json.loads(self.response(False).text)
+        malformed["predictors"] = {"field": "period"}
+        self.agent.client.models.generate_content.side_effect = [
+            Mock(text=json.dumps(malformed)),
+            self.response(False),
+        ]
+
+        selection = self.agent.select_method("Compare revenue", self.profile)
+
+        self.assertEqual(selection["predictors"], ["period"])
+        calls = self.agent.client.models.generate_content.call_args_list
+        self.assertEqual(calls[0].kwargs["model"], "mock-model")
+        self.assertEqual(calls[1].kwargs["model"], "fallback-model")
+
+    def test_all_models_with_invalid_method_schema_raise_clear_error(self):
+        malformed = json.loads(self.response(False).text)
+        malformed["assumptions_to_check"] = {"missing": "array"}
+        self.agent.client.models.generate_content.return_value = Mock(text=json.dumps(malformed))
+
+        with self.assertRaisesRegex(RuntimeError, "invalid method-selection response"):
+            self.agent.select_method("Compare revenue", self.profile)
+
     def test_code_generation_receives_selected_method_plan(self):
         self.agent.client.models.generate_content.return_value = Mock(
             text="REASONING PLAN: Use a paired comparison.\n\n"

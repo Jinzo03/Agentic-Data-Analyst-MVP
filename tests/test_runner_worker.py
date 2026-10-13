@@ -30,6 +30,7 @@ print(f'filtered_rows: {len(filtered)}')
             "suffix": ".csv",
             "data_base64": base64.b64encode(csv_data).decode("ascii"),
             "code": code,
+            "alpha": 0.1,
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -58,6 +59,8 @@ print(f'filtered_rows: {len(filtered)}')
         self.assertEqual(payload["status"], "success", payload["error"])
         self.assertIn("filtered_rows: 2", payload["stdout"])
         self.assertEqual(payload["numeric_results"]["metrics.filtered_rows"], 2)
+        self.assertEqual(payload["numeric_results"]["significance_threshold"], 0.1)
+        self.assertEqual(payload["numeric_results"]["metrics.significance_threshold"], 0.1)
 
         changes = payload["data_changes"]
         operations = [change["operation"] for change in changes]

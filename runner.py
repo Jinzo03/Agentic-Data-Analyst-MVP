@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 import re
 import subprocess
 import threading
@@ -65,6 +66,9 @@ except (OSError, subprocess.TimeoutExpired) as exc:
     environment["pip_freeze"] = f"# pip freeze unavailable: {type(exc).__name__}"
 
 payload = json.load(sys.stdin)
+alpha = float(payload.get("alpha", 0.05))
+if not math.isfinite(alpha) or not 0.0 < alpha < 1.0:
+    raise ValueError("alpha must be a finite number between 0 and 1.")
 csv_suffix = payload.get("suffix", ".csv")
 data_path = Path(tempfile.gettempdir()) / ("uploaded_data" + csv_suffix)
 data_path.write_bytes(base64.b64decode(payload["data_base64"]))
@@ -91,7 +95,7 @@ class CappedStringIO(io.StringIO):
         return value
 
 stdout_capture = CappedStringIO()
-metrics = {"significance_threshold": 0.05}
+metrics = {"significance_threshold": alpha}
 data_changes = []
 MAX_CELL_COMPARISON = 250000
 
@@ -307,7 +311,7 @@ try:
 
     numeric_results = {
         "dataset_rows": int(dataset_rows),
-        "significance_threshold": 0.05,
+        "significance_threshold": alpha,
     }
 
     def add_numeric(key, value):
@@ -407,11 +411,15 @@ class CodeExecutionRunner:
         *,
         docker_image: str = SANDBOX_IMAGE,
         timeout: int = MAX_RUNTIME_SECONDS,
+        alpha: float = 0.05,
     ) -> None:
+        if not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or not 0.0 < float(alpha) < 1.0:
+            raise ValueError("alpha must be a finite number between 0 and 1.")
         self.data_path = str(Path(data_path).resolve())
         self.output_dir = str(Path(output_dir).resolve())
         self.docker_image = docker_image
         self.timeout = timeout
+        self.alpha = float(alpha)
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
         # Retained for existing callers that inspect or close runner.con.
@@ -502,6 +510,7 @@ class CodeExecutionRunner:
                 "code": code_str,
                 "suffix": data_path.suffix.lower() or ".csv",
                 "data_base64": base64.b64encode(data_bytes).decode("ascii"),
+                "alpha": self.alpha,
             }
         )
         command = [

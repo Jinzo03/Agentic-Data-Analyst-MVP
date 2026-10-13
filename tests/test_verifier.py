@@ -1,6 +1,7 @@
 import unittest
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -147,6 +148,29 @@ class NumericVerificationTest(unittest.TestCase):
         )
 
         self.assertTrue(result["verified"], result["violations"])
+
+    def test_significance_decision_uses_selected_alpha(self):
+        report = "The test p-value was 0.04 and the result was significant."
+        metrics = {"p_value": 0.04}
+
+        strict = self.verifier.verify_report(report, "", metrics, alpha=0.01)
+        default = self.verifier.verify_report(report, "", metrics, alpha=0.05)
+
+        self.assertFalse(strict["verified"])
+        self.assertTrue(any("FALSE POSITIVE" in item for item in strict["violations"]))
+        self.assertTrue(default["verified"], default["violations"])
+
+    def test_report_generation_prompt_receives_selected_alpha(self):
+        self.verifier.client = Mock()
+        self.verifier.model = "mock-model"
+        self.verifier.fallback_models = ()
+        self.verifier.client.models.generate_content.return_value = Mock(text="Report")
+
+        self.verifier.generate_report("Check a difference", "p_value: 0.04", alpha=0.01)
+
+        call = self.verifier.client.models.generate_content.call_args.kwargs
+        self.assertIn("alpha = 0.01", call["config"].system_instruction)
+        self.assertIn("Selected significance level (alpha): 0.01", call["contents"])
 
 
 if __name__ == "__main__":
