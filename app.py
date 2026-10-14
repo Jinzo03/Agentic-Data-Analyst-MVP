@@ -477,7 +477,7 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
     if answer_count <= 1 and not has_retry:
         return
 
-    previous_col, count_col, next_col, retry_col = st.columns([1.5, 1.0, 1.5, 2.0])
+    previous_col, count_col, next_col = st.columns([1.0, 1.0, 1.0])
     with previous_col:
         if answer_count > 1:
             st.button(
@@ -485,13 +485,15 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 key=f"answer_previous_{turn_id}",
                 help="Show the previous answer",
                 disabled=active_index <= 0,
-                icon=":material/chevron_left:",
                 on_click=set_active_answer,
                 args=(turn_id, -1),
             )
     with count_col:
         if answer_count > 1:
-            st.caption(f"{active_index + 1} / {answer_count}")
+            st.markdown(
+                f"<div style='text-align: center'>{active_index + 1} / {answer_count}</div>",
+                unsafe_allow_html=True,
+            )
     with next_col:
         if answer_count > 1:
             st.button(
@@ -499,20 +501,18 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 key=f"answer_next_{turn_id}",
                 help="Show the next answer",
                 disabled=active_index >= answer_count - 1,
-                icon=":material/chevron_right:",
                 on_click=set_active_answer,
                 args=(turn_id, 1),
             )
-    with retry_col:
-        if has_retry:
-            st.button(
-                "Try again",
-                key=f"answer_retry_{turn_id}",
-                help="Generate another answer to this question",
-                icon=":material/refresh:",
-                on_click=queue_answer_retry,
-                args=(turn_id,),
-            )
+    if has_retry:
+        st.button(
+            "Try again",
+            key=f"answer_retry_{turn_id}",
+            help="Generate another answer to this question",
+            icon=":material/refresh:",
+            on_click=queue_answer_retry,
+            args=(turn_id,),
+        )
 
 
 def render_message(message: dict[str, Any]) -> None:
@@ -702,16 +702,17 @@ def process_queued_answer_retry() -> None:
         return
 
     try:
-        with st.spinner("Generating another answer..."):
-            new_answer = run_analysis_turn(
-                retry_context["query"],
-                retry_context["profile_report"],
-                retry_context["conversation_history"],
-                st.session_state["dataset_path"],
-                dataset_name=st.session_state["dataset_name"],
-                max_code_refinements=retry_context["max_code_refinements"],
-                alpha=retry_context["alpha"],
-            )
+        with st.chat_message("assistant"):
+            with st.spinner("Regenerating response..."):
+                new_answer = run_analysis_turn(
+                    retry_context["query"],
+                    retry_context["profile_report"],
+                    retry_context["conversation_history"],
+                    st.session_state["dataset_path"],
+                    dataset_name=st.session_state["dataset_name"],
+                    max_code_refinements=retry_context["max_code_refinements"],
+                    alpha=retry_context["alpha"],
+                )
     except Exception as exc:
         message["retry_error"] = f"{type(exc).__name__}: {exc}"
         return
