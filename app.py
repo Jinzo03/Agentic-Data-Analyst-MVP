@@ -18,6 +18,13 @@ import pandas as pd
 import streamlit as st
 
 from agent import AgenticDataAnalyst
+from chat_flow import (
+    active_answer,
+    build_conversation_history,
+    move_answer,
+    regenerate_answer,
+    submit_chat_turn,
+)
 from profiler import DataProfiler
 from runner import CodeExecutionRunner
 from verifier import VerificationLayer
@@ -435,38 +442,13 @@ def run_analysis_turn(
     }
 
 
-def active_answer(message: dict[str, Any]) -> dict[str, Any]:
-    """Return the selected answer version for a chat message."""
-    versions = message.get("answer_versions")
-    if not versions:
-        return message
-    index = message.get("active_answer_index", len(versions) - 1)
-    index = max(0, min(int(index), len(versions) - 1))
-    message["active_answer_index"] = index
-    return versions[index]
-
-
 def set_active_answer(message_id: str, offset: int) -> None:
     """Move between stored answer versions from a Streamlit callback."""
-    for message in st.session_state.get("chat_messages", []):
-        if message.get("turn_id") == message_id:
-            versions = message.get("answer_versions", [])
-            if versions:
-                current = int(message.get("active_answer_index", len(versions) - 1))
-                message["active_answer_index"] = max(
-                    0, min(current + offset, len(versions) - 1)
-                )
-            return
+    move_answer(st.session_state.get("chat_messages", []), message_id, offset)
 
 
 def queue_answer_retry(message_id: str) -> None:
     st.session_state["retry_answer_id"] = message_id
-
-
-def make_answer_version(message: dict[str, Any]) -> dict[str, Any]:
-    """Copy the user-visible response payload without its version metadata."""
-    metadata = {"answer_versions", "active_answer_index", "turn_id", "retry_context", "retry_error"}
-    return {key: value for key, value in message.items() if key not in metadata}
 
 
 def render_answer_controls(message: dict[str, Any], answer_count: int, active_index: int) -> None:
@@ -697,32 +679,19 @@ def process_queued_answer_retry() -> None:
     if message is None or not st.session_state.get("dataset_path"):
         return
 
-    retry_context = message.get("retry_context", {})
-    if retry_context.get("dataset_hash") != st.session_state.get("dataset_hash"):
-        message["retry_error"] = "The dataset changed; this answer can no longer be regenerated."
-        return
-
     try:
         with st.chat_message("assistant"):
             with st.spinner("Regenerating response..."):
-                new_answer = run_analysis_turn(
-                    retry_context["query"],
-                    retry_context["profile_report"],
-                    retry_context["conversation_history"],
-                    st.session_state["dataset_path"],
+                regenerate_answer(
+                    message,
+                    run_turn=run_analysis_turn,
+                    data_path=st.session_state["dataset_path"],
                     dataset_name=st.session_state["dataset_name"],
-                    max_code_refinements=retry_context["max_code_refinements"],
-                    alpha=retry_context["alpha"],
+                    dataset_hash=st.session_state.get("dataset_hash"),
                 )
     except Exception as exc:
         message["retry_error"] = f"{type(exc).__name__}: {exc}"
         return
-
-    if not message.get("answer_versions"):
-        message["answer_versions"] = [make_answer_version(message)]
-    message["answer_versions"].append(make_answer_version(new_answer))
-    message["active_answer_index"] = len(message["answer_versions"]) - 1
-    message.pop("retry_error", None)
 
 
 for state_key, initial_value in (
@@ -852,52 +821,24 @@ else:
     prompt = st.chat_input("Ask about the data or follow up on an earlier result")
     if prompt:
         user_message = {"role": "user", "content": prompt}
-        prior_messages = st.session_state["chat_messages"][-MAX_HISTORY_MESSAGES:]
-        conversation_history = [
-            {
-                "role": message["role"],
-                "content": (
-                    active_answer(message).get("context", active_answer(message)["content"])
-                    if message["role"] == "assistant"
-                    else message["content"]
-                ),
-            }
-            for message in prior_messages
-        ]
+        conversation_history = build_conversation_history(
+            st.session_state["chat_messages"], MAX_HISTORY_MESSAGES
+        )
         st.session_state["chat_messages"].append(user_message)
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.spinner("Analyzing your request..."):
-            try:
-                response_message = run_analysis_turn(
-                    prompt,
-                    st.session_state["profile_report"],
-                    conversation_history,
-                    st.session_state["dataset_path"],
-                    dataset_name=st.session_state["dataset_name"],
-                    max_code_refinements=max_code_refinements,
-                    alpha=alpha,
-                )
-            except Exception as exc:
-                response_message = {
-                    "role": "assistant",
-                    "content": f"I couldn't complete that turn: {type(exc).__name__}: {exc}",
-                    "context": f"Turn error: {type(exc).__name__}: {exc}",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "audit": {},
-                }
-        if not response_message.get("needs_clarification"):
-            response_message["turn_id"] = uuid.uuid4().hex
-            response_message["answer_versions"] = [make_answer_version(response_message)]
-            response_message["active_answer_index"] = 0
-            response_message["retry_context"] = {
-                "query": prompt,
-                "conversation_history": conversation_history,
-                "profile_report": st.session_state["profile_report"],
-                "dataset_hash": st.session_state["dataset_hash"],
-                "max_code_refinements": max_code_refinements,
-                "alpha": alpha,
-            }
+            response_message = submit_chat_turn(
+                prompt,
+                st.session_state["profile_report"],
+                conversation_history,
+                run_turn=run_analysis_turn,
+                data_path=st.session_state["dataset_path"],
+                dataset_name=st.session_state["dataset_name"],
+                dataset_hash=st.session_state["dataset_hash"],
+                max_code_refinements=max_code_refinements,
+                alpha=alpha,
+            )
         st.session_state["chat_messages"].append(response_message)
         render_message(response_message)
