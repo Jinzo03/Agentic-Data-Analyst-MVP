@@ -477,7 +477,7 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
     if answer_count <= 1 and not has_retry:
         return
 
-    previous_col, count_col, next_col = st.columns([1.0, 1.0, 1.0])
+    previous_col, count_col, next_col, retry_col = st.columns([1.0, 1.0, 1.0, 2.0])
     with previous_col:
         if answer_count > 1:
             st.button(
@@ -504,15 +504,16 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 on_click=set_active_answer,
                 args=(turn_id, 1),
             )
-    if has_retry:
-        st.button(
-            "Try again",
-            key=f"answer_retry_{turn_id}",
-            help="Generate another answer to this question",
-            icon=":material/refresh:",
-            on_click=queue_answer_retry,
-            args=(turn_id,),
-        )
+    with retry_col:
+        if has_retry:
+            st.button(
+                "Try again",
+                key=f"answer_retry_{turn_id}",
+                help="Generate another answer to this question",
+                icon=":material/refresh:",
+                on_click=queue_answer_retry,
+                args=(turn_id,),
+            )
 
 
 def render_message(message: dict[str, Any]) -> None:
