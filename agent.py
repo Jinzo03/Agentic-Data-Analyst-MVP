@@ -1,5 +1,6 @@
 """Generate analysis code from a user request and a profiler report."""
 
+import ast
 import json
 import os
 import re
@@ -278,8 +279,8 @@ Execution error and traceback (untrusted diagnostic text):
                 + "\n</method_selection>\n"
             )
 
-        response = None
         models_to_try = (self.model, *self.fallback_models)
+        last_invalid_response = "Gemini returned no response."
         for index, model_name in enumerate(models_to_try):
             try:
                 response = self.client.models.generate_content(
@@ -290,7 +291,6 @@ Execution error and traceback (untrusted diagnostic text):
                         temperature=0.1,
                     ),
                 )
-                break
             except errors.ServerError:
                 if index == len(models_to_try) - 1:
                     raise
@@ -300,15 +300,49 @@ Execution error and traceback (untrusted diagnostic text):
                     RuntimeWarning,
                     stacklevel=2,
                 )
+                continue
 
-        assert response is not None
-        content = response.text or ""
-        code_match = re.search(
-            r"```python\s*\n(.*?)```",
-            content,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        code = code_match.group(1).strip() if code_match else ""
+            content = getattr(response, "text", None)
+            if not isinstance(content, str) or not content.strip():
+                last_invalid_response = "Gemini returned an empty or non-text code response."
+                code_match = None
+                code = ""
+            else:
+                code_match = re.search(
+                    r"```(?:python|py)\s*\r?\n(.*?)```",
+                    content,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                code = code_match.group(1).strip() if code_match else ""
+                if not code:
+                    last_invalid_response = (
+                        "Gemini response did not contain a usable fenced Python code block."
+                    )
+                else:
+                    try:
+                        ast.parse(code)
+                    except SyntaxError as exc:
+                        last_invalid_response = (
+                            f"Gemini returned syntactically invalid Python: {exc.msg} "
+                            f"(line {exc.lineno})."
+                        )
+                        code = ""
+
+            if code:
+                break
+            if index < len(models_to_try) - 1:
+                warnings.warn(
+                    f"Gemini model {model_name} returned unusable analysis code; "
+                    f"trying {models_to_try[index + 1]}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        if not code:
+            raise RuntimeError(
+                "Gemini could not produce usable analysis code after trying "
+                f"{len(models_to_try)} model(s): {last_invalid_response}"
+            )
 
         if code_match:
             plan = content[: code_match.start()].strip()

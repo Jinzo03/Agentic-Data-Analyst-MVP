@@ -129,6 +129,33 @@ class AgentMethodSelectionTest(unittest.TestCase):
         prompt = self.agent.client.models.generate_content.call_args.kwargs["contents"]
         self.assertIn('"pairing_field": "customer_id"', prompt)
 
+    def test_code_generation_retries_malformed_or_empty_code_response(self):
+        self.agent.fallback_models = ("fallback-model",)
+        self.agent.client.models.generate_content.side_effect = [
+            Mock(text="REASONING PLAN: Compare groups.\n\nPYTHON CODE:\n```python\nprint(\n````"),
+            Mock(text="REASONING PLAN: Compare groups.\n\nPYTHON CODE:\n```python\nprint('ok')\n```")
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "unusable analysis code"):
+            generated = self.agent.generate_analysis_code("Compare groups", self.profile)
+
+        self.assertEqual(generated["code"], "print('ok')")
+        calls = self.agent.client.models.generate_content.call_args_list
+        self.assertEqual([call.kwargs["model"] for call in calls], [
+            "mock-model", "fallback-model"
+        ])
+
+    def test_code_generation_raises_clear_error_when_all_responses_are_unusable(self):
+        self.agent.fallback_models = ("fallback-model",)
+        self.agent.client.models.generate_content.side_effect = [
+            Mock(text="   "),
+            Mock(text="I can help with that, but no code block was returned."),
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "unusable analysis code"):
+            with self.assertRaisesRegex(RuntimeError, "could not produce usable analysis code"):
+                self.agent.generate_analysis_code("Compare groups", self.profile)
+
 
 if __name__ == "__main__":
     unittest.main()

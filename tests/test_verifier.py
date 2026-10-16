@@ -164,13 +164,73 @@ class NumericVerificationTest(unittest.TestCase):
         self.verifier.client = Mock()
         self.verifier.model = "mock-model"
         self.verifier.fallback_models = ()
-        self.verifier.client.models.generate_content.return_value = Mock(text="Report")
+        self.verifier.client.models.generate_content.return_value = Mock(text=(
+            "## Executive Summary\nSummary.\n"
+            "## Key Statistical Findings\nFindings.\n"
+            "## Risk & Caveats\nCaveats.\n"
+            "## Business Recommendation\nRecommendation."
+        ))
 
         self.verifier.generate_report("Check a difference", "p_value: 0.04", alpha=0.01)
 
         call = self.verifier.client.models.generate_content.call_args.kwargs
         self.assertIn("alpha = 0.01", call["config"].system_instruction)
         self.assertIn("Selected significance level (alpha): 0.01", call["contents"])
+
+    def test_report_generation_retries_empty_response_on_fallback_model(self):
+        self.verifier.model = "mock-model"
+        self.verifier.fallback_models = ("fallback-model",)
+        self.verifier.client = Mock()
+        self.verifier.client.models.generate_content.side_effect = [
+            Mock(text=" \n"),
+            Mock(text=(
+                "## Executive Summary\nSummary.\n"
+                "## Key Statistical Findings\nThe groups differ.\n"
+                "## Risk & Caveats\nCaveat.\n"
+                "## Business Recommendation\nRecommendation."
+            )),
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "unusable report"):
+            report = self.verifier.generate_report("Compare groups", "p_value: 0.02")
+
+        self.assertIn("The groups differ.", report)
+        calls = self.verifier.client.models.generate_content.call_args_list
+        self.assertEqual([call.kwargs["model"] for call in calls], [
+            "mock-model", "fallback-model"
+        ])
+
+    def test_report_generation_raises_clear_error_when_all_responses_are_empty(self):
+        self.verifier.model = "mock-model"
+        self.verifier.fallback_models = ("fallback-model",)
+        self.verifier.client = Mock()
+        self.verifier.client.models.generate_content.side_effect = [
+            Mock(text=None), Mock(text=" ")
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "unusable report"):
+            with self.assertRaisesRegex(RuntimeError, "could not produce a usable analysis report"):
+                self.verifier.generate_report("Compare groups", "p_value: 0.02")
+
+    def test_report_generation_retries_response_missing_required_sections(self):
+        self.verifier.model = "mock-model"
+        self.verifier.fallback_models = ("fallback-model",)
+        self.verifier.client = Mock()
+        self.verifier.client.models.generate_content.side_effect = [
+            Mock(text="Only a summary."),
+            Mock(text=(
+                "## Executive Summary\nSummary.\n"
+                "## Key Statistical Findings\nFindings.\n"
+                "## Risk & Caveats\nCaveats.\n"
+                "## Business Recommendation\nRecommendation."
+            )),
+        ]
+
+        with self.assertWarnsRegex(RuntimeWarning, "unusable report"):
+            report = self.verifier.generate_report("Compare groups", "p_value: 0.02")
+
+        self.assertIn("## Business Recommendation", report)
+        self.assertEqual(self.verifier.client.models.generate_content.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -107,7 +107,13 @@ Use these headings:
             f"<data_changes_json>\n{changes_json}\n</data_changes_json>"
         )
         models_to_try = (self.model, *self.fallback_models)
-
+        last_invalid_response = "Gemini returned no response."
+        required_sections = (
+            "Executive Summary",
+            "Key Statistical Findings",
+            "Risk & Caveats",
+            "Business Recommendation",
+        )
         for index, model_name in enumerate(models_to_try):
             try:
                 response = self.client.models.generate_content(
@@ -118,10 +124,6 @@ Use these headings:
                         temperature=0.0,
                     ),
                 )
-                report = response.text
-                if not report or not report.strip():
-                    raise RuntimeError("Gemini returned an empty report.")
-                return report.strip()
             except errors.ServerError:
                 if index == len(models_to_try) - 1:
                     raise
@@ -131,8 +133,37 @@ Use these headings:
                     RuntimeWarning,
                     stacklevel=2,
                 )
+                continue
 
-        raise RuntimeError("Gemini did not return a report.")
+            report = getattr(response, "text", None)
+            if isinstance(report, str) and report.strip() and re.search(r"[A-Za-z0-9]", report):
+                missing_sections = [
+                    heading for heading in required_sections
+                    if heading.casefold() not in report.casefold()
+                ]
+                if not missing_sections:
+                    return report.strip()
+                last_invalid_response = (
+                    "Gemini returned a report missing required sections: "
+                    + ", ".join(missing_sections)
+                    + "."
+                )
+            else:
+                last_invalid_response = (
+                    "Gemini returned an empty, non-text, or malformed report response."
+                )
+            if index < len(models_to_try) - 1:
+                warnings.warn(
+                    f"Gemini model {model_name} returned an unusable report; "
+                    f"trying {models_to_try[index + 1]}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        raise RuntimeError(
+            "Gemini could not produce a usable analysis report after trying "
+            f"{len(models_to_try)} model(s): {last_invalid_response}"
+        )
 
     def verify_report(
         self,
