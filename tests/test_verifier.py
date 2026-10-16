@@ -160,6 +160,57 @@ class NumericVerificationTest(unittest.TestCase):
         self.assertTrue(any("FALSE POSITIVE" in item for item in strict["violations"]))
         self.assertTrue(default["verified"], default["violations"])
 
+    def test_significance_claim_matches_the_named_test_among_multiple_p_values(self):
+        result = self.verifier.verify_report(
+            "The Welch's t-test was statistically significant.",
+            "",
+            {
+                "welch_t_test_p_value": 0.01,
+                "mann_whitney_p_value": 0.20,
+            },
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+        self.assertEqual(len(result["significance_checks"]), 1)
+        self.assertEqual(result["significance_checks"][0]["metric"], "welch_t_test_p_value")
+        self.assertTrue(result["significance_checks"][0]["significant"])
+
+    def test_named_test_significance_uses_its_own_p_value_for_contradiction(self):
+        result = self.verifier.verify_report(
+            "The Mann-Whitney test was statistically significant.",
+            "",
+            {
+                "welch_t_test_p_value": 0.001,
+                "mann_whitney_p_value": 0.20,
+            },
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("FALSE POSITIVE" in item for item in result["violations"]))
+        self.assertEqual(result["significance_checks"][0]["metric"], "mann_whitney_p_value")
+
+    def test_generic_significance_claim_stays_incomplete_with_multiple_tests(self):
+        result = self.verifier.verify_report(
+            "The result was statistically significant.",
+            "",
+            {"welch_t_test_p_value": 0.01, "mann_whitney_p_value": 0.20},
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["status"], "incomplete")
+        self.assertTrue(any("UNVERIFIED SIGNIFICANCE" in item for item in result["violations"]))
+
+    def test_named_test_claim_is_incomplete_when_its_p_value_label_is_ambiguous(self):
+        result = self.verifier.verify_report(
+            "The Welch t-test was significant.",
+            "",
+            {"welch_t_test_p_value": 0.01, "welch_t_test_p": 0.02},
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["status"], "incomplete")
+        self.assertTrue(any("matches multiple runner metrics" in item for item in result["violations"]))
+
     def test_report_generation_prompt_receives_selected_alpha(self):
         self.verifier.client = Mock()
         self.verifier.model = "mock-model"

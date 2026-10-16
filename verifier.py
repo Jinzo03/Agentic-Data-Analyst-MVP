@@ -449,6 +449,33 @@ Use these headings:
             re.IGNORECASE,
         )
 
+        def test_descriptor(key: str) -> list[str]:
+            """Return distinctive test-name tokens from a labeled p-value key."""
+            clean_key = re.sub(r"^(?:metrics|stdout)[._\s-]*", "", key, flags=re.IGNORECASE)
+            suffix = re.search(
+                r"(?:^|[._\s-])p(?:[._\s-]*(?:value|val))?$",
+                clean_key,
+                flags=re.IGNORECASE,
+            )
+            if not suffix:
+                return []
+            descriptor = clean_key[:suffix.start()].strip("._ -")
+            descriptor_tokens = tokens(descriptor)
+            generic = {"metric", "result", "statistic", "test", "p", "value", "val"}
+            return [token for token in descriptor_tokens if token not in generic]
+
+        def normalized_test_tokens(text: str) -> set[str]:
+            normalized = text.casefold()
+            normalized = re.sub(r"\bttest\b", "t test", normalized)
+            normalized = re.sub(r"\bchi2\b", "chi square", normalized)
+            return set(tokens(normalized))
+
+        test_specific_p_values = [
+            (key, value, test_descriptor(key))
+            for key, value in metric_items
+            if 0.0 <= value <= 1.0 and test_descriptor(key)
+        ]
+
         negative_claim_pattern = re.compile(
             r"\b(?:not|no|isn't|wasn't|is not|was not)\s+"
             r"(?:statistically\s+)?significant\b",
@@ -458,52 +485,109 @@ Use these headings:
             r"\b(?:statistically\s+)?significant\b",
             re.IGNORECASE,
         )
-        has_negative_claim = bool(negative_claim_pattern.search(report_text))
-        report_without_negative_claims = negative_claim_pattern.sub("", report_text)
-        has_positive_claim = bool(
-            positive_claim_pattern.search(report_without_negative_claims)
-        )
+        significance_checks: list[dict[str, Any]] = []
+        unresolved_significance_claims: list[tuple[str, bool, bool]] = []
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", report_text):
+            has_negative = bool(negative_claim_pattern.search(sentence))
+            without_negative = negative_claim_pattern.sub("", sentence)
+            has_positive = bool(positive_claim_pattern.search(without_negative))
+            if not (has_positive or has_negative):
+                continue
 
-        if p_value is not None:
+            sentence_tokens = normalized_test_tokens(sentence)
+            matching_tests = [
+                (key, value) for key, value, descriptor in test_specific_p_values
+                if descriptor and set(descriptor).issubset(sentence_tokens)
+            ]
+            if matching_tests:
+                descriptor_lengths = {
+                    key: len(descriptor)
+                    for key, _, descriptor in test_specific_p_values
+                    if set(descriptor).issubset(sentence_tokens)
+                }
+                longest = max(descriptor_lengths.values())
+                matching_tests = [
+                    item for item in matching_tests
+                    if descriptor_lengths[item[0]] == longest
+                ]
+            if len(matching_tests) == 1:
+                key, test_p_value = matching_tests[0]
+                test_significant = test_p_value < alpha
+                significance_checks.append({
+                    "claim": sentence.strip(),
+                    "metric": key,
+                    "p_value": test_p_value,
+                    "alpha": alpha,
+                    "significant": test_significant,
+                })
+                if test_significant and has_negative:
+                    violations.append(
+                        f"FALSE NEGATIVE: The report says {key} is not significant, "
+                        f"but its p-value is {test_p_value:g} (< alpha {alpha:g})."
+                    )
+                if not test_significant and has_positive:
+                    violations.append(
+                        f"FALSE POSITIVE: The report says {key} is significant, "
+                        f"but its p-value is {test_p_value:g} (>= alpha {alpha:g})."
+                    )
+                if has_positive and has_negative:
+                    violations.append(
+                        f"CONTRADICTORY CLAIMS: The report describes {key} as both "
+                        "significant and not significant."
+                    )
+            elif len(matching_tests) > 1:
+                unresolved_significance_claims.append((sentence, has_positive, has_negative))
+                violations.append(
+                    "UNVERIFIED SIGNIFICANCE CLAIM: The report names a test, but its "
+                    "p-value label matches multiple runner metrics: "
+                    + ", ".join(key for key, _ in matching_tests)
+                    + "."
+                )
+            else:
+                unresolved_significance_claims.append((sentence, has_positive, has_negative))
+
+        unresolved_positive = any(item[1] for item in unresolved_significance_claims)
+        unresolved_negative = any(item[2] for item in unresolved_significance_claims)
+        if unresolved_significance_claims and p_value is not None:
             if not 0.0 <= p_value <= 1.0:
                 violations.append(
                     f"INVALID P-VALUE: Captured p-value {p_value} is outside [0, 1]."
                 )
             else:
                 is_significant = p_value < alpha
-                if is_significant and has_negative_claim:
+                if is_significant and unresolved_negative:
                     violations.append(
                         "FALSE NEGATIVE: The report says the result is not "
-                        f"statistically significant, but the captured p-value is {p_value:g} (>= alpha {alpha:g})."
+                        f"statistically significant, but the captured p-value is {p_value:g} (< alpha {alpha:g})."
                     )
-                if not is_significant and has_positive_claim:
+                if not is_significant and unresolved_positive:
                     violations.append(
                         "FALSE POSITIVE: The report says the result is "
                         f"statistically significant, but the captured p-value is {p_value:g} (>= alpha {alpha:g})."
                     )
-                if has_positive_claim and has_negative_claim:
+                if unresolved_positive and unresolved_negative:
                     violations.append(
                         "CONTRADICTORY CLAIMS: The report describes the result as both "
                         "significant and not significant."
                     )
-        elif p_bound_match:
+        elif unresolved_significance_claims and p_bound_match:
             comparator = p_bound_match.group(1)
             bound = float(p_bound_match.group(2))
             p_value_source = "runner stdout p-value bound"
             bound_is_significant = comparator in {"<", "<="} and bound <= alpha
             bound_is_nonsignificant = comparator in {">", ">="} and bound >= alpha
-            if bound_is_significant and has_negative_claim:
+            if bound_is_significant and unresolved_negative:
                 violations.append(
                     f"FALSE NEGATIVE: Runner output bounds p below alpha {alpha:g}, but the report says it is not significant."
                 )
-            if bound_is_nonsignificant and has_positive_claim:
+            if bound_is_nonsignificant and unresolved_positive:
                 violations.append(
                     f"FALSE POSITIVE: Runner output bounds p at or above alpha {alpha:g}, but the report says it is significant."
                 )
-        elif (has_positive_claim or has_negative_claim) and not report_bound_metrics:
+        elif unresolved_significance_claims and not report_bound_metrics:
             violations.append(
                 "UNVERIFIED SIGNIFICANCE CLAIM: The report discusses significance, "
-                "but no p-value was found in the executed output."
+                "but no unique matching p-value was found in the executed output."
             )
 
         incomplete_only = bool(violations) and all(
@@ -530,6 +614,7 @@ Use these headings:
             "unsupported_numbers": list(dict.fromkeys(unsupported_numbers)),
             "unmatched_claims": list(dict.fromkeys(unmatched_claims)),
             "matched_claims": matched_claims,
+            "significance_checks": significance_checks,
             "p_value_used": p_value,
             "p_value_source": p_value_source,
         }
