@@ -4,11 +4,15 @@ A conversational data analysis MVP built with Streamlit, Gemini, DuckDB, and Pyt
 
 > **Project status:** Work in progress. Features and documentation will change as the project develops.
 
-## Video demo
+
 
 <!-- Add a short walkthrough link or embed here when available. -->
 
-_Short video demo coming soon._
+
+
+https://github.com/user-attachments/assets/990c3d19-3a1b-47a4-881b-0a44c4553c03
+
+
 
 ## What it does
 
