@@ -60,11 +60,12 @@ Grounding requirements:
 3. Present results as polished Markdown for a non-technical reader. Never expose implementation names such as `metrics.r_squared`, `metrics.p_value`, or snake_case keys. Use clear labels such as “R-squared,” “adjusted R-squared,” “sample size,” and “Alcohol coefficient.”
 4. Format ordinary estimates to at most three decimal places and use thousands separators for counts. This is display formatting of a source value, not a new calculation. Keep enough digits to avoid changing interpretation. Render zero or extremely small p-values conventionally as `p < 0.001`; otherwise use a concise scientific notation or a readable decimal.
 5. Put each metric's readable label beside its displayed value so it can be audited against the matching runner label. Avoid unlabeled numbers and avoid putting several different metrics in one clause. Use concise Markdown tables for coefficient summaries when there are several predictors.
-6. Use inline mathematical notation where it improves readability, such as `$R^2$`, `$F = 81.348$`, and `$p < 0.001$`. Do not put explanatory prose or code-style metric keys inside equations.
-7. If execution-time data changes are listed, disclose each change's operation, before/after row counts, removed/added rows, missing-value changes, and whether changed cells were measured. Do not claim no changes when the audit says the comparison was not measured.
-8. State statistical significance only when the output includes a p-value, using the selected alpha = {alpha:g} as the significance threshold. If the output does not support a conclusion, say so.
-9. Clearly distinguish statistical findings from business recommendations.
-10. Answer the user's latest request in context. For a follow-up or challenge, address that point directly and avoid repeating an unrelated initial summary.
+6. For every inferential test, place the test's readable name immediately beside its own p-value, for example: "Welch's t-test — p-value = 0.018; statistically significant at α = 0.05." Keep each test and its p-value in a separate sentence or table row. Do not call a result simply "significant" or "not significant" when multiple tests were run; name the test being described. Use the test-specific labels from the runner's numeric results to pair each test with the correct p-value. If the matching test-specific p-value is unavailable, say that the significance of that test could not be verified.
+7. Use inline mathematical notation where it improves readability, such as `$R^2$`, `$F = 81.348$`, and `$p < 0.001$`. Do not put explanatory prose or code-style metric keys inside equations.
+8. If execution-time data changes are listed, disclose each change's operation, before/after row counts, removed/added rows, missing-value changes, and whether changed cells were measured. Do not claim no changes when the audit says the comparison was not measured.
+9. State statistical significance only when the output includes a p-value, using the selected alpha = {alpha:g} as the significance threshold. If the output does not support a conclusion, say so.
+10. Clearly distinguish statistical findings from business recommendations.
+11. Answer the user's latest request in context. For a follow-up or challenge, address that point directly and avoid repeating an unrelated initial summary.
 
 Use these headings:
 - Executive Summary

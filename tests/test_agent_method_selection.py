@@ -128,6 +128,11 @@ class AgentMethodSelectionTest(unittest.TestCase):
         self.assertIn("print('paired')", generated["code"])
         prompt = self.agent.client.models.generate_content.call_args.kwargs["contents"]
         self.assertIn('"pairing_field": "customer_id"', prompt)
+        system_prompt = self.agent.client.models.generate_content.call_args.kwargs[
+            "config"
+        ].system_instruction
+        self.assertIn("test-specific metric label", system_prompt)
+        self.assertIn("mann_whitney_u_p_value", system_prompt)
 
     def test_code_generation_retries_malformed_or_empty_code_response(self):
         self.agent.fallback_models = ("fallback-model",)

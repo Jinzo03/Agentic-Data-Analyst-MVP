@@ -189,6 +189,28 @@ class NumericVerificationTest(unittest.TestCase):
         self.assertTrue(any("FALSE POSITIVE" in item for item in result["violations"]))
         self.assertEqual(result["significance_checks"][0]["metric"], "mann_whitney_p_value")
 
+    def test_report_can_state_each_test_beside_its_own_p_value(self):
+        report = (
+            "Welch's t-test — p-value = 0.01; statistically significant. "
+            "Mann-Whitney U test — p-value = 0.20; not statistically significant."
+        )
+        result = self.verifier.verify_report(
+            report,
+            "",
+            {
+                "welch_t_test_p_value": 0.01,
+                "mann_whitney_u_test_p_value": 0.20,
+            },
+        )
+
+        self.assertTrue(result["verified"], result["violations"])
+        checks = {check["metric"]: check for check in result["significance_checks"]}
+        self.assertEqual(set(checks), {
+            "welch_t_test_p_value", "mann_whitney_u_test_p_value"
+        })
+        self.assertTrue(checks["welch_t_test_p_value"]["significant"])
+        self.assertFalse(checks["mann_whitney_u_test_p_value"]["significant"])
+
     def test_generic_significance_claim_stays_incomplete_with_multiple_tests(self):
         result = self.verifier.verify_report(
             "The result was statistically significant.",
@@ -226,6 +248,8 @@ class NumericVerificationTest(unittest.TestCase):
 
         call = self.verifier.client.models.generate_content.call_args.kwargs
         self.assertIn("alpha = 0.01", call["config"].system_instruction)
+        self.assertIn("test's readable name immediately beside its own p-value", call["config"].system_instruction)
+        self.assertIn("test-specific labels", call["config"].system_instruction)
         self.assertIn("Selected significance level (alpha): 0.01", call["contents"])
 
     def test_report_generation_retries_empty_response_on_fallback_model(self):
