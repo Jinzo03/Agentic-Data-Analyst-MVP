@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/990c3d19-3a1b-47a4-881b-0a44c4553c03
 - Runs generated code in a restricted Docker container.
 - Can send execution errors back to Gemini for an automatic code repair, up to the configured maximum.
 - Produces a Markdown report and checks its numeric and significance claims against labeled runner results.
-- Keeps chat context for follow-up questions and lets users retry an answer and navigate between answer versions.
+- Keeps chat context for follow-up questions and lets users edit a question, retry an answer, and navigate between paired question-and-answer versions.
 - Displays generated charts and measured data changes in the dashboard.
 - Saves a reproducibility record for analysis turns under `output/runs/`.
 
@@ -74,8 +74,10 @@ Streamlit prints a local URL in the terminal. Open it in a browser, upload a CSV
 1. Upload a CSV or Parquet file in the sidebar.
 2. Review the dataset preview and profile.
 3. Ask a question in the chat. If method selection needs an essential detail, answer its clarification question.
-4. Continue with follow-up questions, or use **Try again** to request another answer. Use the answer navigation controls to view earlier versions.
+4. Continue with follow-up questions, or use **Try again** to request another answer. Use **Edit** to change a question and regenerate its answer; navigation moves between the saved question-and-answer versions.
 5. Review charts, verification status, settings, and analysis details below the answer.
+
+Editing an earlier question removes later turns from the active conversation because they were based on the previous question and answer. Earlier versions of the edited turn remain available through answer navigation.
 
 The sidebar controls the maximum number of automatic code repairs and the significance threshold (`alpha`).
 

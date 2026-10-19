@@ -21,6 +21,8 @@ from agent import AgenticDataAnalyst
 from chat_flow import (
     active_answer,
     build_conversation_history,
+    edit_chat_turn,
+    link_existing_user_messages,
     move_answer,
     regenerate_answer,
     submit_chat_turn,
@@ -451,6 +453,11 @@ def queue_answer_retry(message_id: str) -> None:
     st.session_state["retry_answer_id"] = message_id
 
 
+def queue_answer_edit(message_id: str, current_query: str) -> None:
+    st.session_state["edit_answer_id"] = message_id
+    st.session_state[f"edit_query_{message_id}"] = current_query
+
+
 def render_answer_controls(message: dict[str, Any], answer_count: int, active_index: int) -> None:
     turn_id = message.get("turn_id")
     if not turn_id:
@@ -500,6 +507,72 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
 
 def render_message(message: dict[str, Any]) -> None:
     """Render one persisted chat turn and its analysis artifacts."""
+    if message["role"] == "user":
+        paired_answer = next(
+            (
+                item for item in st.session_state.get("chat_messages", [])
+                if item.get("role") == "assistant"
+                and item.get("turn_id") == message.get("turn_id")
+            ),
+            None,
+        )
+        selected_answer = active_answer(paired_answer) if paired_answer else message
+        displayed_query = selected_answer.get("query", message["content"])
+        with st.chat_message("user"):
+            st.markdown(displayed_query)
+            turn_id = message.get("turn_id")
+            if turn_id:
+                if st.session_state.get("edit_answer_id") == turn_id:
+                    message_index = next(
+                        index
+                        for index, item in enumerate(st.session_state["chat_messages"])
+                        if item is message
+                    )
+                    paired_index = next(
+                        (
+                            index for index, item in enumerate(st.session_state["chat_messages"])
+                            if index > message_index and item.get("role") == "assistant"
+                            and item.get("turn_id") == turn_id
+                        ),
+                        None,
+                    )
+                    with st.form(f"edit_turn_form_{turn_id}"):
+                        if paired_index is not None and paired_index < len(st.session_state["chat_messages"]) - 1:
+                            st.caption(
+                                "Saving this edit removes later turns because they were "
+                                "based on this question and answer."
+                            )
+                        edited_query = st.text_area(
+                            "Edit your question",
+                            key=f"edit_query_{turn_id}",
+                            height=100,
+                        )
+                        submit_col, cancel_col = st.columns([1, 1])
+                        with submit_col:
+                            submit_edit = st.form_submit_button(
+                                "Save & regenerate", type="primary", width="stretch"
+                            )
+                        with cancel_col:
+                            cancel_edit = st.form_submit_button("Cancel", width="stretch")
+                    if submit_edit:
+                        st.session_state["pending_answer_edit"] = {
+                            "turn_id": turn_id,
+                            "query": edited_query,
+                        }
+                        st.session_state["edit_answer_id"] = None
+                    elif cancel_edit:
+                        st.session_state["edit_answer_id"] = None
+                else:
+                    st.button(
+                        "Edit",
+                        key=f"edit_turn_{turn_id}",
+                        help="Edit this question and regenerate its answer",
+                        icon=":material/edit:",
+                        on_click=queue_answer_edit,
+                        args=(turn_id, displayed_query),
+                    )
+        return
+
     display_message = active_answer(message) if message["role"] == "assistant" else message
     versions = message.get("answer_versions", [])
     active_index = int(message.get("active_answer_index", max(0, len(versions) - 1)))
@@ -509,7 +582,7 @@ def render_message(message: dict[str, Any]) -> None:
             return
         render_answer_controls(message, len(versions), active_index)
         if message.get("retry_error"):
-            st.warning(f"Could not generate another answer: {message['retry_error']}")
+            st.warning(f"Could not regenerate this turn: {message['retry_error']}")
         if display_message.get("needs_clarification"):
             st.info("I need this detail before choosing the analysis method.")
 
@@ -661,6 +734,8 @@ def render_message(message: dict[str, Any]) -> None:
 def clear_conversation() -> None:
     st.session_state["chat_messages"] = []
     st.session_state["retry_answer_id"] = None
+    st.session_state["edit_answer_id"] = None
+    st.session_state["pending_answer_edit"] = None
 
 
 def process_queued_answer_retry() -> None:
@@ -694,6 +769,41 @@ def process_queued_answer_retry() -> None:
         return
 
 
+def process_queued_answer_edit() -> bool:
+    """Regenerate an edited question and refresh the chat with the new version."""
+    pending = st.session_state.pop("pending_answer_edit", None)
+    if not pending:
+        return False
+
+    turn_id = pending["turn_id"]
+    message = next(
+        (
+            item for item in st.session_state["chat_messages"]
+            if item.get("role") == "assistant" and item.get("turn_id") == turn_id
+        ),
+        None,
+    )
+    if message is None:
+        return True
+
+    try:
+        with st.spinner("Regenerating answer for the edited question..."):
+            edit_chat_turn(
+                st.session_state["chat_messages"],
+                turn_id,
+                pending["query"],
+                run_turn=run_analysis_turn,
+                data_path=st.session_state["dataset_path"],
+                dataset_name=st.session_state["dataset_name"],
+                dataset_hash=st.session_state.get("dataset_hash"),
+            )
+    except Exception as exc:
+        message["retry_error"] = f"{type(exc).__name__}: {exc}"
+        st.session_state["edit_answer_id"] = turn_id
+        st.session_state[f"edit_query_{turn_id}"] = pending["query"]
+    return True
+
+
 for state_key, initial_value in (
     ("chat_messages", []),
     ("dataset_path", None),
@@ -703,9 +813,13 @@ for state_key, initial_value in (
     ("dataset_preview", None),
     ("profile_alpha", None),
     ("retry_answer_id", None),
+    ("edit_answer_id", None),
+    ("pending_answer_edit", None),
 ):
     if state_key not in st.session_state:
         st.session_state[state_key] = initial_value
+
+link_existing_user_messages(st.session_state["chat_messages"])
 
 
 with st.sidebar:
@@ -770,6 +884,9 @@ if uploaded_file is not None:
         st.session_state["dataset_preview"] = new_preview
         st.session_state["profile_alpha"] = alpha
         st.session_state["chat_messages"] = []
+        st.session_state["retry_answer_id"] = None
+        st.session_state["edit_answer_id"] = None
+        st.session_state["pending_answer_edit"] = None
 
 if (
     st.session_state["dataset_path"] is not None
@@ -818,9 +935,13 @@ else:
     for stored_message in st.session_state["chat_messages"]:
         render_message(stored_message)
 
+    if process_queued_answer_edit():
+        st.rerun()
+
     prompt = st.chat_input("Ask about the data or follow up on an earlier result")
     if prompt:
-        user_message = {"role": "user", "content": prompt}
+        turn_id = uuid.uuid4().hex
+        user_message = {"role": "user", "content": prompt, "turn_id": turn_id}
         conversation_history = build_conversation_history(
             st.session_state["chat_messages"], MAX_HISTORY_MESSAGES
         )
@@ -839,6 +960,9 @@ else:
                 dataset_hash=st.session_state["dataset_hash"],
                 max_code_refinements=max_code_refinements,
                 alpha=alpha,
+                turn_id=turn_id,
             )
+        if response_message.get("needs_clarification"):
+            user_message.pop("turn_id", None)
         st.session_state["chat_messages"].append(response_message)
         render_message(response_message)
