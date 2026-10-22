@@ -463,6 +463,11 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
     if not turn_id:
         return
     has_retry = bool(message.get("retry_context")) and not message.get("needs_clarification")
+    generation_busy = bool(
+        st.session_state.get("pending_answer_edit")
+        or st.session_state.get("edit_generation_turn_id")
+        or st.session_state.get("retry_answer_id")
+    )
     if answer_count <= 1 and not has_retry:
         return
 
@@ -473,7 +478,7 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 "‹",
                 key=f"answer_previous_{turn_id}",
                 help="Show the previous answer",
-                disabled=active_index <= 0,
+                disabled=active_index <= 0 or generation_busy,
                 on_click=set_active_answer,
                 args=(turn_id, -1),
             )
@@ -489,7 +494,7 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 "›",
                 key=f"answer_next_{turn_id}",
                 help="Show the next answer",
-                disabled=active_index >= answer_count - 1,
+                disabled=active_index >= answer_count - 1 or generation_busy,
                 on_click=set_active_answer,
                 args=(turn_id, 1),
             )
@@ -500,6 +505,7 @@ def render_answer_controls(message: dict[str, Any], answer_count: int, active_in
                 key=f"answer_retry_{turn_id}",
                 help="Generate another answer to this question",
                 icon=":material/refresh:",
+                disabled=generation_busy,
                 on_click=queue_answer_retry,
                 args=(turn_id,),
             )
@@ -522,7 +528,20 @@ def render_message(message: dict[str, Any]) -> None:
             st.markdown(displayed_query)
             turn_id = message.get("turn_id")
             if turn_id:
-                if st.session_state.get("edit_answer_id") == turn_id:
+                generation_busy = bool(
+                    st.session_state.get("pending_answer_edit")
+                    or st.session_state.get("edit_generation_turn_id")
+                    or st.session_state.get("retry_answer_id")
+                )
+                edit_pending = (
+                    (st.session_state.get("pending_answer_edit") or {}).get("turn_id") == turn_id
+                    or st.session_state.get("edit_generation_turn_id") == turn_id
+                )
+                if edit_pending:
+                    st.info("Regenerating the answer for this edited question...")
+                elif generation_busy:
+                    st.caption("Editing is unavailable while another answer is generating.")
+                elif st.session_state.get("edit_answer_id") == turn_id:
                     message_index = next(
                         index
                         for index, item in enumerate(st.session_state["chat_messages"])
@@ -559,6 +578,7 @@ def render_message(message: dict[str, Any]) -> None:
                             "turn_id": turn_id,
                             "query": edited_query,
                         }
+                        st.session_state["edit_generation_turn_id"] = turn_id
                         st.session_state["edit_answer_id"] = None
                     elif cancel_edit:
                         st.session_state["edit_answer_id"] = None
@@ -568,6 +588,11 @@ def render_message(message: dict[str, Any]) -> None:
                         key=f"edit_turn_{turn_id}",
                         help="Edit this question and regenerate its answer",
                         icon=":material/edit:",
+                        disabled=bool(
+                            st.session_state.get("pending_answer_edit")
+                            or st.session_state.get("edit_generation_turn_id")
+                            or st.session_state.get("retry_answer_id")
+                        ),
                         on_click=queue_answer_edit,
                         args=(turn_id, displayed_query),
                     )
@@ -799,8 +824,8 @@ def process_queued_answer_edit() -> bool:
             )
     except Exception as exc:
         message["retry_error"] = f"{type(exc).__name__}: {exc}"
-        st.session_state["edit_answer_id"] = turn_id
-        st.session_state[f"edit_query_{turn_id}"] = pending["query"]
+    finally:
+        st.session_state["edit_generation_turn_id"] = None
     return True
 
 
@@ -815,6 +840,7 @@ for state_key, initial_value in (
     ("retry_answer_id", None),
     ("edit_answer_id", None),
     ("pending_answer_edit", None),
+    ("edit_generation_turn_id", None),
 ):
     if state_key not in st.session_state:
         st.session_state[state_key] = initial_value
@@ -887,6 +913,7 @@ if uploaded_file is not None:
         st.session_state["retry_answer_id"] = None
         st.session_state["edit_answer_id"] = None
         st.session_state["pending_answer_edit"] = None
+        st.session_state["edit_generation_turn_id"] = None
 
 if (
     st.session_state["dataset_path"] is not None
