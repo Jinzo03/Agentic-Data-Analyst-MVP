@@ -11,6 +11,7 @@ from chat_flow import (
     active_answer,
     build_conversation_history,
     edit_chat_turn,
+    find_answer_message,
     link_existing_user_messages,
     move_answer,
     prepare_assistant_message,
@@ -91,6 +92,19 @@ class ChatFlowTest(unittest.TestCase):
         link_existing_user_messages(messages)
 
         self.assertEqual(messages[0]["turn_id"], "legacy-turn")
+
+    def test_retry_lookup_selects_assistant_when_user_and_assistant_share_turn_id(self):
+        user_message = {"role": "user", "content": "Question", "turn_id": "paired-turn"}
+        answer_message = {
+            "role": "assistant", "content": "Answer", "turn_id": "paired-turn",
+            "answer_versions": [{"content": "Answer"}],
+            "retry_context": {"query": "Question"},
+        }
+
+        self.assertIs(
+            find_answer_message([user_message, answer_message], "paired-turn"),
+            answer_message,
+        )
 
 
     def test_try_again_reuses_turn_context_and_alpha_then_preserves_versions(self):

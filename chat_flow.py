@@ -57,6 +57,21 @@ def move_answer(messages: list[dict[str, Any]], message_id: str, offset: int) ->
             return
 
 
+def find_answer_message(
+    messages: list[dict[str, Any]], message_id: str
+) -> dict[str, Any] | None:
+    """Find the assistant message for a turn whose user and assistant share an ID."""
+    return next(
+        (
+            message for message in messages
+            if message.get("role") == "assistant"
+            and message.get("turn_id") == message_id
+            and message.get("answer_versions")
+        ),
+        None,
+    )
+
+
 def link_existing_user_messages(messages: list[dict[str, Any]]) -> None:
     """Link pre-edit-feature user turns to their adjacent versioned assistant turn."""
     for index, message in enumerate(messages):

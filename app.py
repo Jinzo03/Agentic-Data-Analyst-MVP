@@ -22,6 +22,7 @@ from chat_flow import (
     active_answer,
     build_conversation_history,
     edit_chat_turn,
+    find_answer_message,
     link_existing_user_messages,
     move_answer,
     regenerate_answer,
@@ -769,13 +770,7 @@ def process_queued_answer_retry() -> None:
     if not turn_id:
         return
 
-    message = next(
-        (
-            item for item in st.session_state["chat_messages"]
-            if item.get("turn_id") == turn_id
-        ),
-        None,
-    )
+    message = find_answer_message(st.session_state["chat_messages"], turn_id)
     if message is None or not st.session_state.get("dataset_path"):
         return
 
