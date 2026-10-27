@@ -114,4 +114,4 @@ The unit tests mock Gemini responses and do not need a Gemini API key. Runner an
 
 The agent chooses methods based on the request, conversation, and available profile information, but it cannot infer missing study-design details reliably. Complex methods may need a clear outcome, predictor, pairing or time field, and design information. Inspect generated code and run details when the method or data handling matters to your conclusions.
 
-This README is an initial project guide and will be updated as capabilities, setup, and deployment evolve.
+This README is an initial project guide and will be updated as capabilities, setup, and deployment evolve. 
